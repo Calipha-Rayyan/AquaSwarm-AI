@@ -1,89 +1,113 @@
 ```markdown
 # AquaSwarm-AI
 
-## AI-Powered Multi-Agent Water Operations System
+### AI-Powered Multi-Agent Water Operations System
 
-AquaSwarm-AI is a multi-agent AI system designed to improve water resource management through intelligent demand analysis, anomaly detection, supplier selection, water allocation, human approval, delivery coordination, and verification.
+AquaSwarm-AI is a multi-agent AI system designed to support intelligent water resource management through demand analysis, anomaly detection, supplier selection, water allocation, human approval, delivery coordination, and verification.
 
-The system combines specialized AI agents with deterministic water-management tools and a Streamlit dashboard to provide an end-to-end operational workflow.
-
----
-
-## Key Features
-
-- Multi-agent water operations workflow
-- Water demand and shortage analysis
-- Water anomaly detection
-- Supplier evaluation and selection
-- Intelligent water allocation
-- Human-in-the-loop manager approval
-- Delivery coordination
-- Delivery verification
-- Replanning after rejected allocations
-- Interactive Streamlit dashboard
-- Login interface
-- Structured agent outputs using Pydantic
+The system combines specialized AI agents, deterministic water-management tools, and an interactive Streamlit dashboard to provide an end-to-end water operations workflow.
 
 ---
 
-## System Workflow
+## 🚀 Key Features
+
+- 🤖 Multi-agent water operations
+- 📊 Water demand and shortage analysis
+- ⚠️ Anomaly detection
+- 🚚 Supplier evaluation and selection
+- 💧 Intelligent water allocation
+- 👨‍💼 Human-in-the-loop approval
+- 📦 Delivery coordination
+- 🔍 Delivery verification
+- 🔄 Replanning after rejection
+- 🖥️ Interactive Streamlit dashboard
+- 🔐 Login interface
+- 📋 Structured agent outputs using Pydantic
+
+---
+
+## 🔄 System Workflow
 
 ```text
-Water Data
-    ↓
-Demand Agent
-    ↓
-Anomaly Agent
-    ↓
-Supply Agent
-    ↓
-Allocation Agent
-    ↓
-Manager Approval
-   ↙       ↘
-Approve   Reject
-   ↓        ↓
-Delivery  Replanning
-   ↓
-Verification
+                    Water Data
+                        │
+                        ▼
+                 Demand Agent
+                        │
+                        ▼
+                Anomaly Agent
+                        │
+                        ▼
+                 Supply Agent
+                        │
+                        ▼
+              Allocation Agent
+                        │
+                        ▼
+              Manager Approval
+                 ┌──────┴──────┐
+                 │             │
+              APPROVE        REJECT
+                 │             │
+                 ▼             ▼
+          Delivery Agent   Replanning Agent
+                 │
+                 ▼
+        Verification Agent
 ```
 
-The system pauses at the allocation stage until a human manager approves or rejects the proposed operation.
+The workflow pauses at the **Manager Approval** stage. The proposed allocation is not executed until the manager approves it.
 
 ---
 
-## Multi-Agent System
+## 🤖 Multi-Agent System
 
 | Agent | Responsibility |
 |---|---|
-| Demand Agent | Analyzes demand, shortage, and priority |
-| Anomaly Agent | Detects abnormal water conditions |
-| Supply Agent | Evaluates available suppliers |
-| Allocation Agent | Proposes water quantity and supplier |
-| Approval | Handles human manager decision |
-| Delivery Agent | Coordinates the approved delivery |
-| Verification Agent | Verifies delivery quantity and status |
-| Replanning Agent | Generates an alternative plan after rejection |
+| **Demand Agent** | Analyzes water demand, shortage, and priority |
+| **Anomaly Agent** | Detects abnormal water conditions |
+| **Supply Agent** | Evaluates available suppliers |
+| **Allocation Agent** | Proposes water quantity and supplier |
+| **Approval** | Handles the manager's decision |
+| **Delivery Agent** | Coordinates the approved delivery |
+| **Verification Agent** | Verifies delivery quantity and status |
+| **Replanning Agent** | Generates an alternative action after rejection |
 
 ---
 
-## Technology Stack
+## 🧠 How It Works
 
-- **Python 3.11+**
-- **CrewAI** – Multi-agent orchestration
-- **Groq** – LLM inference
-- **Pydantic** – Structured data validation
-- **Streamlit** – Web dashboard
-- **Pandas** – Data processing
-- **Plotly** – Data visualization
-- **python-dotenv** – Environment configuration
+1. **Analyze** — Water data is evaluated to identify demand and potential shortages.
+2. **Detect** — The system checks for abnormal water conditions.
+3. **Select** — Available suppliers are evaluated.
+4. **Allocate** — The system proposes the required quantity and supplier.
+5. **Approve** — A manager reviews and approves or rejects the recommendation.
+6. **Execute** — Approved allocations proceed to delivery coordination.
+7. **Verify** — Delivery quantity and status are checked.
+8. **Replan** — Rejected allocations are sent to the replanning stage.
 
 ---
 
-## Project Structure
+## 🛠️ Technology Stack
+
+| Technology | Purpose |
+|---|---|
+| **Python 3.11+** | Core development |
+| **CrewAI** | Multi-agent orchestration |
+| **Groq** | LLM inference |
+| **Pydantic** | Data validation and structured outputs |
+| **Streamlit** | Web dashboard |
+| **Pandas** | Data processing |
+| **Plotly** | Data visualization |
+| **python-dotenv** | Environment configuration |
+
+---
+
+## 📁 Project Structure
 
 ```text
 AquaSwarm-AI/
+│
 ├── agents/
 │   ├── allocation/
 │   ├── anomaly/
@@ -94,12 +118,14 @@ AquaSwarm-AI/
 │   ├── replanning/
 │   ├── supply/
 │   └── verification/
+│
 ├── config/
 ├── data/
 ├── models/
 ├── tools/
 ├── ui/
 ├── workflows/
+│
 ├── app.py
 ├── requirements.txt
 └── README.md
@@ -107,16 +133,16 @@ AquaSwarm-AI/
 
 ---
 
-## Setup
+## ⚙️ Installation & Setup
 
-### 1. Clone the repository
+### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/Calipha-Rayyan/AquaSwarm-AI.git
 cd AquaSwarm-AI
 ```
 
-### 2. Create and activate virtual environment
+### 2. Create a Virtual Environment
 
 **Windows:**
 
@@ -125,13 +151,13 @@ python -m venv .venv
 .venv\Scripts\activate
 ```
 
-### 3. Install dependencies
+### 3. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4. Configure environment variables
+### 4. Configure Environment Variables
 
 Create a `.env` file in the project root:
 
@@ -139,43 +165,74 @@ Create a `.env` file in the project root:
 GROQ_API_KEY=your_groq_api_key
 ```
 
-### 5. Run the application
+### 5. Run the Application
 
 ```bash
 streamlit run app.py
 ```
 
+The Streamlit dashboard will open in your browser.
+
 ---
 
-## Human-in-the-Loop
+## 👨‍💼 Human-in-the-Loop
 
 AquaSwarm-AI keeps the final water allocation decision under human control.
 
 After the AI agents generate an allocation recommendation, the manager can:
 
-- **Approve** → Delivery and verification proceed.
-- **Reject** → The Replanning Agent generates the next operational action.
+### Approve
 
-This provides human oversight while allowing AI agents to automate analysis and operational coordination.
-
----
-
-## Documentation
-
-The project's detailed product requirements, functional requirements, system scope, user workflows, and product specifications are documented separately in the **Product Requirements Document (PRD)**.
-
----
-
-## Project Status
-
-AquaSwarm-AI currently provides a working prototype of the multi-agent water operations workflow, including the Streamlit dashboard, login interface, agent pipeline, human approval mechanism, delivery coordination, verification, and replanning.
-
----
-
-## Team
-
-**AquaSwarm-AI**
-
-Multi-Agent AI for Intelligent Water Operations
+```text
+Manager Approval
+       ↓
+Delivery
+       ↓
+Verification
 ```
 
+### Reject
+
+```text
+Manager Rejection
+       ↓
+Replanning
+```
+
+This approach combines AI-driven operational analysis with human oversight for critical decisions.
+
+---
+
+## 📋 Documentation
+
+Detailed product requirements, system scope, functional requirements, workflows, and product specifications are documented separately in the project's **Product Requirements Document (PRD)**.
+
+The README provides a high-level technical and operational overview, while the PRD contains the detailed product definition.
+
+---
+
+## 📌 Project Status
+
+**Current Status: Working Prototype**
+
+The current prototype includes:
+
+- Multi-agent water operations workflow
+- Streamlit dashboard
+- Login interface
+- Demand and anomaly analysis
+- Supplier selection
+- Water allocation
+- Human manager approval
+- Delivery coordination
+- Verification
+- Replanning
+
+---
+
+## 👥 Team
+
+### AquaSwarm-AI
+
+**Multi-Agent AI for Intelligent Water Operations**
+```
