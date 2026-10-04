@@ -9,27 +9,43 @@ def create_delivery_task(
 ) -> Task:
     agent = create_delivery_agent()
 
+    delivery_quantity = allocation_result.allocated_quantity
+    supplier_id = allocation_result.supplier_id
+    delivery_status = "In Transit"
+
     return Task(
         description=f"""
-        Coordinate the following water delivery:
+        Coordinate the following approved water delivery:
 
         Tank ID: {allocation_result.tank_id}
-        Supplier ID: {allocation_result.supplier_id}
-        Allocated quantity: {allocation_result.allocated_quantity} units
+        Supplier ID: {supplier_id}
+        Allocated quantity: {delivery_quantity} units
         Priority: {allocation_result.priority}
 
-        The delivery has been approved for dispatch.
+        Deterministic delivery information:
 
-        Determine:
-        1. Delivery quantity
-        2. Supplier
-        3. Delivery status
-        4. Estimated arrival time
+        Delivery quantity:
+        {delivery_quantity} units
 
-        Use the actual Allocation Agent result provided above.
+        Supplier:
+        {supplier_id}
 
-        Assume the delivery is successfully dispatched and is currently
-        in transit. Provide a realistic estimated arrival time.
+        Delivery status:
+        {delivery_status}
+
+        These values are authoritative.
+
+        The delivery has been approved and dispatched.
+        The delivery is currently in transit.
+
+        Provide:
+        1. The estimated arrival time
+        2. Brief reasoning about the delivery status
+
+        Do not change:
+        - the delivery quantity
+        - the supplier ID
+        - the delivery status
 
         Return the result as a structured DeliveryResult.
         """,

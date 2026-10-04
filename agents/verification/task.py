@@ -10,6 +10,22 @@ def create_verification_task(
 ) -> Task:
     agent = create_verification_agent()
 
+    quantity_matches = (
+        delivery_result.quantity == allocation_result.allocated_quantity
+    )
+
+    delivery_completed = (
+        delivery_result.status.lower() == "delivered"
+    )
+
+    verified = quantity_matches and delivery_completed
+
+    discrepancy = (
+        allocation_result.allocated_quantity - delivery_result.quantity
+    )
+
+    verification_status = "Verified" if verified else "Pending"
+
     return Task(
         description=f"""
         Verify the following water delivery:
@@ -25,17 +41,36 @@ def create_verification_task(
         Supplier ID: {delivery_result.supplier_id}
         Status: {delivery_result.status}
 
-        Determine:
-        1. The delivered quantity
-        2. Whether the delivery is verified
-        3. Any discrepancy between approved and delivered quantity
-        4. Verification status
-        5. Brief reasoning
+        Deterministic verification checks:
 
-        The delivery should be considered verified if the actual delivered
-        quantity matches the approved allocation.
+        Quantity matches approved allocation:
+        {quantity_matches}
 
-        Use the actual Allocation Agent and Delivery Agent results provided above.
+        Delivery has been completed:
+        {delivery_completed}
+
+        Deterministic verification result:
+        Verified: {verified}
+
+        Discrepancy:
+        {discrepancy} units
+
+        Verification status:
+        {verification_status}
+
+        Verification rules:
+
+        1. The delivered quantity must match the approved allocation.
+        2. The delivery status must be "Delivered".
+        3. Both conditions must be satisfied before the delivery
+           can be marked as verified.
+
+        Use the deterministic verification results above as
+        authoritative.
+
+        Do not mark an "In Transit" delivery as verified.
+
+        Provide a brief reasoning explaining the verification result.
 
         Return the result as a structured VerificationResult.
         """,

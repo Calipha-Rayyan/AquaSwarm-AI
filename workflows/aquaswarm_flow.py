@@ -1,3 +1,4 @@
+import pandas as pd
 from crewai.flow.flow import Flow, start, listen, router
 from pydantic import BaseModel
 
@@ -41,6 +42,9 @@ from agents.verification.task import create_verification_task
 class AquaSwarmState(BaseModel):
     """State shared across the AquaSwarm workflow."""
 
+    selected_tank_id: str = "TANK-001"
+    operation_status: str = "Pending"
+
     water_data: WaterData | None = None
     demand_result: DemandResult | None = None
     anomaly_result: AnomalyResult | None = None
@@ -56,21 +60,35 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
 
     @start()
     def initialize(self):
-        """Initialize the workflow with water tank data."""
+        """Load the selected water tank from the CSV dataset."""
+
+        data = pd.read_csv("data/sample_water_data.csv")
+
+        selected_rows = data[
+            data["tank_id"] == self.state.selected_tank_id
+        ]
+
+        if selected_rows.empty:
+            raise ValueError(
+                f"Tank {self.state.selected_tank_id} was not found "
+                "in data/sample_water_data.csv."
+            )
+
+        row = selected_rows.iloc[0]
 
         self.state.water_data = WaterData(
-            tank_id="TANK-001",
-            current_level=30,
-            capacity=100,
-            daily_demand=80,
-            inflow=10,
-            timestamp="2026-10-03T18:00:00",
+            tank_id=str(row["tank_id"]),
+            current_level=float(row["current_level"]),
+            capacity=float(row["capacity"]),
+            daily_demand=float(row["daily_demand"]),
+            inflow=float(row["inflow"]),
+            timestamp=str(row["timestamp"]),
         )
 
         print("\n==============================")
         print("AQUASWARM FLOW STARTED")
         print("==============================")
-
+        print(f"Selected Tank: {self.state.selected_tank_id}")
         print(f"Tank ID: {self.state.water_data.tank_id}")
         print(f"Current Level: {self.state.water_data.current_level}")
         print(f"Daily Demand: {self.state.water_data.daily_demand}")
@@ -81,7 +99,10 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
         """Run the Demand Agent."""
 
         agent = create_demand_agent()
-        task = create_demand_task()
+
+        task = create_demand_task(
+            self.state.water_data,
+        )
 
         task.agent = agent
 
@@ -101,11 +122,51 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
         print("\nDemand Result:")
         print(self.state.demand_result)
 
-    @listen(analyze_demand)
+
+    @router(analyze_demand)
+    def route_after_demand(self):
+        """Decide whether water replenishment is required."""
+
+        if self.state.demand_result.shortage > 0:
+            return "replenishment_required"
+
+        return "no_replenishment"
+
+
+    @listen("no_replenishment")
+    def no_replenishment_required(self):
+        """Stop procurement when the tank has sufficient water."""
+
+        self.state.operation_status = "No Replenishment Required"
+
+        print("\n==============================")
+        print("NO REPLENISHMENT REQUIRED")
+        print("==============================")
+        print(
+            f"Tank {self.state.water_data.tank_id} "
+            "has sufficient water."
+        )
+        print(
+            f"Current Level: "
+            f"{self.state.water_data.current_level}"
+        )
+        print(
+            f"Daily Demand: "
+            f"{self.state.water_data.daily_demand}"
+        )
+        print(
+            f"Shortage: "
+            f"{self.state.demand_result.shortage}"
+        )
+
+
+    @listen("replenishment_required")
     def analyze_anomaly(self):
         """Run the Anomaly Agent."""
+        self.state.operation_status = "Replenishment Required"
 
         agent = create_anomaly_agent()
+
         task = create_anomaly_task(
             self.state.water_data,
             self.state.demand_result,
@@ -134,6 +195,7 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
         """Run the Supply Agent."""
 
         agent = create_supply_agent()
+
         task = create_supply_task(
             self.state.water_data,
             self.state.demand_result,
@@ -162,6 +224,7 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
         """Run the Allocation Agent."""
 
         agent = create_allocation_agent()
+
         task = create_allocation_task(
             self.state.demand_result,
             self.state.supply_result,
@@ -190,6 +253,7 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
         """Run the Manager Approval Agent."""
 
         agent = create_manager_approval_agent()
+
         task = create_manager_approval_task(
             self.state.allocation_result,
         )
@@ -226,6 +290,7 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
         """Run the Delivery Agent after Manager Approval."""
 
         agent = create_delivery_agent()
+
         task = create_delivery_task(
             self.state.allocation_result,
         )
@@ -253,6 +318,7 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
         """Run the Replanning Agent after Manager Rejection."""
 
         agent = create_replanning_agent()
+
         task = create_replanning_task(
             self.state.allocation_result,
             self.state.manager_approval_result,
@@ -281,6 +347,7 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
         """Run the Verification Agent."""
 
         agent = create_verification_agent()
+
         task = create_verification_task(
             self.state.allocation_result,
             self.state.delivery_result,
@@ -311,4 +378,9 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
 
 if __name__ == "__main__":
     flow = AquaSwarmFlow()
-    flow.kickoff()
+
+    flow.kickoff(
+        inputs={
+            "selected_tank_id": "TANK-001"
+        }
+    )
