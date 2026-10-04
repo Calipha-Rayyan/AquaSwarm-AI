@@ -1,101 +1,89 @@
 ```markdown
-# 🌊 AquaSwarm AI
+# AquaSwarm-AI
 
-> **An AI-powered multi-agent system for intelligent water resource management.**
+## AI-Powered Multi-Agent Water Operations System
 
-AquaSwarm AI uses specialized AI agents to analyze water demand, detect anomalies, evaluate suppliers, allocate water resources, obtain manager approval, coordinate delivery, verify delivery, and replan rejected allocations.
+AquaSwarm-AI is a multi-agent AI system designed to improve water resource management through intelligent demand analysis, anomaly detection, supplier selection, water allocation, human approval, delivery coordination, and verification.
+
+The system combines specialized AI agents with deterministic water-management tools and a Streamlit dashboard to provide an end-to-end operational workflow.
 
 ---
 
-## 🚀 AquaSwarm AI Workflow
+## Key Features
+
+- Multi-agent water operations workflow
+- Water demand and shortage analysis
+- Water anomaly detection
+- Supplier evaluation and selection
+- Intelligent water allocation
+- Human-in-the-loop manager approval
+- Delivery coordination
+- Delivery verification
+- Replanning after rejected allocations
+- Interactive Streamlit dashboard
+- Login interface
+- Structured agent outputs using Pydantic
+
+---
+
+## System Workflow
 
 ```text
-                         ┌──────────────────┐
-                         │    Water Data    │
-                         └────────┬─────────┘
-                                  │
-                                  ▼
-                         ┌──────────────────┐
-                         │  Demand Agent    │
-                         │    Analysis      │
-                         └────────┬─────────┘
-                                  │
-                                  ▼
-                         ┌──────────────────┐
-                         │  Anomaly Agent   │
-                         │    Detection     │
-                         └────────┬─────────┘
-                                  │
-                                  ▼
-                         ┌──────────────────┐
-                         │   Supply Agent   │
-                         │    Analysis      │
-                         └────────┬─────────┘
-                                  │
-                                  ▼
-                         ┌──────────────────┐
-                         │ Allocation Agent │
-                         │ Water Allocation │
-                         └────────┬─────────┘
-                                  │
-                                  ▼
-                         ┌──────────────────┐
-                         │ Manager Approval │
-                         └────────┬─────────┘
-                                  │
-                 ┌────────────────┴────────────────┐
-                 │                                 │
-              Approved                          Rejected
-                 │                                 │
-                 ▼                                 ▼
-        ┌──────────────────┐              ┌──────────────────┐
-        │  Delivery Agent  │              │ Replanning Agent │
-        │    Delivery      │              │    Replanning    │
-        └────────┬─────────┘              └──────────────────┘
-                 │
-                 ▼
-        ┌──────────────────┐
-        │ Verification     │
-        │      Agent       │
-        │   Verification   │
-        └──────────────────┘
+Water Data
+    ↓
+Demand Agent
+    ↓
+Anomaly Agent
+    ↓
+Supply Agent
+    ↓
+Allocation Agent
+    ↓
+Manager Approval
+   ↙       ↘
+Approve   Reject
+   ↓        ↓
+Delivery  Replanning
+   ↓
+Verification
 ```
+
+The system pauses at the allocation stage until a human manager approves or rejects the proposed operation.
 
 ---
 
-## 🤖 Multi-Agent System
+## Multi-Agent System
 
 | Agent | Responsibility |
 |---|---|
-| **Demand Agent** | Analyzes water demand, shortage, and priority |
-| **Anomaly Agent** | Detects abnormal water conditions |
-| **Supply Agent** | Evaluates available water suppliers |
-| **Allocation Agent** | Determines allocation quantity and supplier |
-| **Manager Approval Agent** | Reviews and approves or rejects allocations |
-| **Delivery Agent** | Coordinates approved water deliveries |
-| **Verification Agent** | Verifies delivered quantity and discrepancies |
-| **Replanning Agent** | Reassesses rejected allocations |
+| Demand Agent | Analyzes demand, shortage, and priority |
+| Anomaly Agent | Detects abnormal water conditions |
+| Supply Agent | Evaluates available suppliers |
+| Allocation Agent | Proposes water quantity and supplier |
+| Approval | Handles human manager decision |
+| Delivery Agent | Coordinates the approved delivery |
+| Verification Agent | Verifies delivery quantity and status |
+| Replanning Agent | Generates an alternative plan after rejection |
 
 ---
 
-## 🛠️ Technology Stack
+## Technology Stack
 
-- **Python 3.11**
-- **CrewAI**
-- **CrewAI Flow**
-- **Groq**
-- **Pydantic**
-- **Streamlit**
-- **Pandas**
-- **Plotly**
+- **Python 3.11+**
+- **CrewAI** – Multi-agent orchestration
+- **Groq** – LLM inference
+- **Pydantic** – Structured data validation
+- **Streamlit** – Web dashboard
+- **Pandas** – Data processing
+- **Plotly** – Data visualization
+- **python-dotenv** – Environment configuration
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```text
 AquaSwarm-AI/
-│
 ├── agents/
 │   ├── allocation/
 │   ├── anomaly/
@@ -106,122 +94,44 @@ AquaSwarm-AI/
 │   ├── replanning/
 │   ├── supply/
 │   └── verification/
-│
 ├── config/
-│   └── settings.py
-│
 ├── data/
-│   └── sample_water_data.csv
-│
 ├── models/
-│   └── schemas.py
-│
 ├── tools/
-│   └── water_tools.py
-│
 ├── ui/
-│   └── dashboard.py
-│
 ├── workflows/
-│   └── aquaswarm_flow.py
-│
 ├── app.py
-├── .gitignore
+├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## 📊 Current Workflow
+## Setup
 
-The system currently supports an end-to-end simulated water management workflow:
-
-1. **Water Data Initialization**
-2. **Demand Analysis**
-3. **Anomaly Detection**
-4. **Supply Analysis**
-5. **Water Allocation**
-6. **Manager Approval**
-7. **Delivery Coordination**
-8. **Delivery Verification**
-9. **Replanning for Rejected Allocations**
-
----
-
-## 🔄 Decision Routing
-
-```text
-Manager Approval
-       │
-       ├── Approved ──→ Delivery ──→ Verification
-       │
-       └── Rejected ──→ Replanning
-```
-
----
-
-## 📌 Current Status
-
-### Completed
-
-- [x] Multi-agent architecture
-- [x] Pydantic data schemas
-- [x] Water management tools
-- [x] CrewAI Flow orchestration
-- [x] Demand analysis
-- [x] Anomaly detection
-- [x] Supply analysis
-- [x] Water allocation
-- [x] Manager approval and rejection
-- [x] Approval routing
-- [x] Delivery coordination
-- [x] Delivery verification
-- [x] Replanning branch
-- [x] End-to-end workflow testing
-
-### Next Development
-
-- [ ] Streamlit manager dashboard integration
-- [ ] Interactive manager approval controls
-- [ ] Real-time water monitoring interface
-- [ ] Agent activity visualization
-- [ ] Alerts and exception handling
-- [ ] Persistent workflow data
-- [ ] Real supplier/backend integration
-- [ ] Improved delivery and verification lifecycle
-
----
-
-## ▶️ Installation
-
-Clone the repository:
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/Calipha-Rayyan/AquaSwarm-AI.git
 cd AquaSwarm-AI
 ```
 
-Create a virtual environment:
+### 2. Create and activate virtual environment
+
+**Windows:**
 
 ```bash
 python -m venv .venv
-```
-
-Activate the virtual environment on Windows:
-
-```cmd
 .venv\Scripts\activate
 ```
 
-Install dependencies:
+### 3. Install dependencies
 
 ```bash
-pip install streamlit crewai groq pydantic pandas plotly python-dotenv litellm
+pip install -r requirements.txt
 ```
 
----
-
-## 🔐 Environment Configuration
+### 4. Configure environment variables
 
 Create a `.env` file in the project root:
 
@@ -229,21 +139,43 @@ Create a `.env` file in the project root:
 GROQ_API_KEY=your_groq_api_key
 ```
 
-> **Never commit `.env` or API keys to GitHub.**
+### 5. Run the application
 
----
-
-## ▶️ Run the Workflow
-
-From the project root:
-
-```cmd
-python -m workflows.aquaswarm_flow
+```bash
+streamlit run app.py
 ```
 
 ---
 
-## 🎯 Project Goal
+## Human-in-the-Loop
 
-AquaSwarm AI aims to provide an intelligent and coordinated platform for **water resource monitoring, decision-making, allocation, delivery, verification, and adaptive replanning** using a collaborative multi-agent AI architecture.
+AquaSwarm-AI keeps the final water allocation decision under human control.
+
+After the AI agents generate an allocation recommendation, the manager can:
+
+- **Approve** → Delivery and verification proceed.
+- **Reject** → The Replanning Agent generates the next operational action.
+
+This provides human oversight while allowing AI agents to automate analysis and operational coordination.
+
+---
+
+## Documentation
+
+The project's detailed product requirements, functional requirements, system scope, user workflows, and product specifications are documented separately in the **Product Requirements Document (PRD)**.
+
+---
+
+## Project Status
+
+AquaSwarm-AI currently provides a working prototype of the multi-agent water operations workflow, including the Streamlit dashboard, login interface, agent pipeline, human approval mechanism, delivery coordination, verification, and replanning.
+
+---
+
+## Team
+
+**AquaSwarm-AI**
+
+Multi-Agent AI for Intelligent Water Operations
 ```
+
