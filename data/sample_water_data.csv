@@ -1,0 +1,4 @@
+tank_id,current_level,capacity,daily_demand,inflow,timestamp
+TANK-001,30,100,80,10,2026-10-04T18:00:00
+TANK-002,70,100,60,20,2026-10-04T18:00:00
+TANK-003,15,100,90,5,2026-10-04T18:00:00
