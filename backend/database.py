@@ -60,14 +60,14 @@ def initialize_database():
     """)
 
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS delivery_requests (
-            id INTEGER PRIMARY KEY,
-            site_id INTEGER NOT NULL,
-            supplier_id INTEGER NOT NULL,
-            quantity REAL NOT NULL,
-            status TEXT NOT NULL
-        )
-    """)
+    CREATE TABLE IF NOT EXISTS delivery_requests (
+        id INTEGER PRIMARY KEY,
+        site_id INTEGER NOT NULL,
+        supplier_id INTEGER NOT NULL,
+        quantity REAL NOT NULL,
+        status TEXT NOT NULL
+    )
+""")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS agent_runs (
