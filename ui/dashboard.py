@@ -631,6 +631,8 @@ def render_dashboard(
         "Verified" if verified is True
         else "Review Required"
         if verification_raw_status == "REVIEW_REQUIRED" or verified is False
+        else "Waiting for Delivery"
+        if delivery_status in {"DISPATCHED", "DELIVERED"} and verification_result is None
         else "Not Started"
     )
 
@@ -873,10 +875,38 @@ def render_dashboard(
         """
     )
 
-    def step(name, number, done=False, active=False, state="Pending", human=False):
-        cls = "completed" if done else "active" if active else "pending"
+    def step(
+        name,
+        number,
+        done=False,
+        active=False,
+        state="Pending",
+        human=False,
+        skipped=False,
+    ):
+        # Preserve the richer workflow-state animation from the earlier branch:
+        # skipped stages are rendered as disabled/dashed nodes instead of looking
+        # like unfinished work. Active and completed stages keep their animations.
+        if skipped:
+            cls = "skipped"
+        elif active:
+            cls = "active"
+        elif done:
+            cls = "completed"
+        else:
+            cls = "pending"
+
         extra = " human" if human else ""
-        symbol = "✓" if done else "→" if active else str(number)
+
+        if skipped:
+            symbol = "—"
+        elif active:
+            symbol = "→"
+        elif done:
+            symbol = "✓"
+        else:
+            symbol = str(number)
+
         return f"""
         <div class="workflow-step {cls}{extra}">
             <div class="workflow-node {cls}">{symbol}</div>
@@ -924,7 +954,8 @@ def render_dashboard(
     else:
         steps = step("Demand", 1, True, state="Completed")
         for name in ("Anomaly", "Supply", "Allocation", "Approval", "Delivery", "Verification"):
-            steps += step(name, "", state="Not Required")
+            # Skipped stages use the branch version's disabled visual state.
+            steps += step(name, "", state="Not Required", skipped=True)
 
     st.html(
         f"""
