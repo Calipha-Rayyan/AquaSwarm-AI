@@ -461,6 +461,14 @@ def import_consumption() -> None:
         conn.commit()
 
 
+def _csv_float(row: dict, key: str, default: float) -> float:
+    try:
+        value = str(row.get(key, "")).strip()
+        return float(value) if value else default
+    except ValueError:
+        return default
+
+
 def import_suppliers() -> None:
     rows = read_csv(SUPPLIERS_CSV)
 
@@ -481,16 +489,71 @@ def import_suppliers() -> None:
                     row["name"].strip(),
                     float(row["capacity"]),
                     normalize_bool(row["available"]),
-                    0.0,
-                    0.0,
-                    60,
-                    None,
+                    # Optional logistics columns; defaults keep old CSVs valid.
+                    _csv_float(row, "distance_km", 0.0),
+                    _csv_float(row, "estimated_cost", 0.0),
+                    int(_csv_float(row, "eta_minutes", 60)),
+                    (row.get("phone") or "").strip() or None,
                     utc_now(),
                 )
                 for row in rows
             ],
         )
         conn.commit()
+
+
+def refresh_supplier_logistics() -> None:
+    """Fill distance/cost/ETA from suppliers.csv for databases that were
+    seeded before those columns existed (all-zero logistics only)."""
+    rows = read_csv(SUPPLIERS_CSV)
+    if not any(
+        _csv_float(r, "distance_km", 0) or _csv_float(r, "estimated_cost", 0)
+        for r in rows
+    ):
+        return
+
+    stale = query_one(
+        "SELECT COUNT(*) AS count FROM suppliers "
+        "WHERE distance_km > 0 OR estimated_cost > 0"
+    )["count"]
+    if stale:
+        return
+
+    with get_connection() as conn:
+        for row in rows:
+            conn.execute(
+                "UPDATE suppliers SET distance_km = ?, estimated_cost = ?, "
+                "eta_minutes = ?, last_updated = ? WHERE id = ?",
+                (
+                    _csv_float(row, "distance_km", 0.0),
+                    _csv_float(row, "estimated_cost", 0.0),
+                    int(_csv_float(row, "eta_minutes", 60)),
+                    utc_now(),
+                    int(row["id"]),
+                ),
+            )
+        conn.commit()
+
+
+def seed_if_needed() -> None:
+    """Import any seed table that is empty.
+
+    Each importer is all-or-nothing, so a failed import can never leave a
+    half-filled table that blocks every later start (the old behaviour only
+    seeded when `sites` was empty, which could leave the backend unusable).
+    """
+    importers = (
+        ("sites", SITES_CSV, import_sites),
+        ("tanks", TANKS_CSV, import_tanks),
+        ("consumption", CONSUMPTION_CSV, import_consumption),
+        ("suppliers", SUPPLIERS_CSV, import_suppliers),
+    )
+
+    for table, path, importer in importers:
+        count = query_one(f"SELECT COUNT(*) AS count FROM {table}")["count"]
+        if count == 0:
+            validate_csv_headers(table, path)
+            importer()
 
 
 def import_csv_data() -> None:
@@ -513,25 +576,11 @@ def import_csv_data() -> None:
 # ============================================================
 
 def validate_database() -> None:
-    expected_counts = {
-        "sites": 5,
-        "tanks": 5,
-        "consumption": 5,
-        "suppliers": 3,
-    }
+    for table in ("sites", "tanks", "consumption", "suppliers"):
+        row = query_one(f"SELECT COUNT(*) AS count FROM {table}")
 
-    for table, expected in expected_counts.items():
-        row = query_one(
-            f"SELECT COUNT(*) AS count FROM {table}"
-        )
-
-        actual = int(row["count"])
-
-        if actual != expected:
-            raise RuntimeError(
-                f"{table}: expected {expected} rows, "
-                f"found {actual}."
-            )
+        if int(row["count"]) == 0:
+            raise RuntimeError(f"{table}: table is empty after seeding.")
 
     orphan_tanks = query_one(
         """
@@ -590,14 +639,8 @@ def initialize_database() -> None:
             backup_incompatible_database()
 
     create_schema()
-
-    sites_count = query_one(
-        "SELECT COUNT(*) AS count FROM sites"
-    )["count"]
-
-    if sites_count == 0:
-        import_csv_data()
-
+    seed_if_needed()
+    refresh_supplier_logistics()
     validate_database()
 
 

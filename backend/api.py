@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from backend.security import cors_origins, docs_enabled, require_api_key
 from backend.database import (
     initialize_database,
     query_all,
@@ -13,19 +14,27 @@ from backend.database import (
     execute_returning_id,
 )
 
+_DOCS = docs_enabled()
+
 app = FastAPI(
     title="AquaSwarm AI Backend",
     description="Water operations and multi-agent data API",
-    version="1.0.0",
+    version="1.1.0",
+    # Every route except /health requires the X-API-Key header.
+    dependencies=[Depends(require_api_key)],
+    # Interactive docs are off unless AQUASWARM_ENABLE_DOCS=true.
+    docs_url="/docs" if _DOCS else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if _DOCS else None,
 )
 
-# Prototype CORS policy. Restrict origins before production.
+# Origins come from AQUASWARM_CORS_ORIGINS (no wildcard).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH"],
+    allow_headers=["X-API-Key", "Content-Type"],
 )
 
 initialize_database()

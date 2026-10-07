@@ -3,15 +3,56 @@ from __future__ import annotations
 import os
 import re
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import requests
+
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+class BackendError(RuntimeError):
+    """Base class for backend failures. The message is safe to show in the UI."""
+
+
+class BackendUnavailable(BackendError):
+    """The backend could not be reached or initialised."""
+
+
+class BackendAuthError(BackendError):
+    """The backend rejected the API key."""
 
 
 def _default_timeout() -> float:
     try:
-        return max(0.5, float(os.getenv("AQUASWARM_BACKEND_TIMEOUT", "1.0")))
+        return max(0.5, float(os.getenv("AQUASWARM_BACKEND_TIMEOUT", "5.0")))
     except ValueError:
-        return 1.0
+        return 5.0
+
+
+def _api_key() -> str:
+    key = os.getenv("AQUASWARM_API_KEY", "").strip()
+    if key:
+        return key
+    try:  # Streamlit secrets (sectioned/non-env secrets)
+        import streamlit as st
+
+        if "AQUASWARM_API_KEY" in st.secrets:
+            return str(st.secrets["AQUASWARM_API_KEY"]).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _load_inprocess_api():
+    """Import the FastAPI module and surface the real failure reason."""
+    try:
+        from backend import api
+
+        return api
+    except Exception as exc:  # database seeding, missing package, locked file...
+        raise BackendUnavailable(
+            f"In-process backend failed to initialise: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 class BackendClient:
@@ -19,12 +60,14 @@ class BackendClient:
     AquaSwarm backend client.
 
     Modes:
-      - http: use the FastAPI server over HTTP.
-      - inprocess: call the same FastAPI endpoint functions in-process.
-      - auto: try HTTP first; if the server is unavailable, switch to in-process.
+      - http: call the FastAPI server over HTTP with the X-API-Key header.
+      - inprocess: call the same endpoint functions directly (no network).
+      - auto: try HTTP first and use in-process only if the server cannot be
+        reached (connection error/timeout). HTTP 4xx/5xx errors are never
+        hidden.
 
-    The in-process mode is important for Streamlit Community Cloud because
-    Streamlit Cloud runs the Streamlit app, not a separate Uvicorn service.
+    There is no CSV fallback. Failures raise BackendError subclasses with the
+    real reason so the operation can stop and show it.
     """
 
     def __init__(
@@ -32,22 +75,21 @@ class BackendClient:
         base_url: Optional[str] = None,
         timeout: Optional[float] = None,
         mode: Optional[str] = None,
+        api_key: Optional[str] = None,
     ):
         self.base_url = (
             base_url
-            or os.getenv(
-                "AQUASWARM_API_URL",
-                "http://127.0.0.1:8000",
-            )
+            or os.getenv("AQUASWARM_API_URL", "http://127.0.0.1:8000")
         ).rstrip("/")
 
         requested_mode = (
             mode
-            or os.getenv("AQUASWARM_BACKEND_MODE", "auto")
-        ).strip().lower()
+            or os.getenv("AQUASWARM_BACKEND_MODE", "")
+            or ("auto" if os.getenv("AQUASWARM_API_URL") else "inprocess")
+        ).strip().strip('"').strip("'").lower()
 
         if requested_mode not in {"auto", "http", "inprocess"}:
-            requested_mode = "auto"
+            requested_mode = "inprocess"
 
         self.mode = requested_mode
         self.timeout = (
@@ -55,19 +97,35 @@ class BackendClient:
             if timeout is None
             else max(0.5, float(timeout))
         )
+        self.api_key = api_key if api_key is not None else _api_key()
 
         self._http_failed = False
+        self._session = requests.Session()
         self.mode_label = (
-            "BACKEND API (IN-PROCESS)"
-            if self.mode == "inprocess"
-            else "BACKEND API (HTTP)"
-            if self.mode == "http"
-            else "BACKEND API (AUTO)"
+            "IN-PROCESS" if self.mode == "inprocess"
+            else "HTTP" if self.mode == "http"
+            else "AUTO"
         )
 
     # ------------------------------------------------------------------
     # HTTP
     # ------------------------------------------------------------------
+
+    def _check_transport(self) -> None:
+        """Never send the API key over plain HTTP to a remote host."""
+        parsed = urlparse(self.base_url)
+        host = (parsed.hostname or "").lower()
+        if (
+            self.api_key
+            and parsed.scheme != "https"
+            and host not in _LOCAL_HOSTS
+            and os.getenv("AQUASWARM_ALLOW_INSECURE_HTTP", "").lower()
+            not in {"1", "true", "yes"}
+        ):
+            raise BackendError(
+                "Refusing to send the API key over unencrypted HTTP to "
+                f"{host}. Use an https:// AQUASWARM_API_URL."
+            )
 
     def _request_http(
         self,
@@ -75,14 +133,27 @@ class BackendClient:
         endpoint: str,
         **kwargs: Any,
     ):
+        self._check_transport()
         url = f"{self.base_url}{endpoint}"
         kwargs.setdefault("timeout", self.timeout)
 
-        response = requests.request(
+        headers = dict(kwargs.pop("headers", None) or {})
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
+
+        response = self._session.request(
             method,
             url,
+            headers=headers,
             **kwargs,
         )
+
+        if response.status_code in (401, 403):
+            raise BackendAuthError(
+                "The backend rejected the API key (HTTP "
+                f"{response.status_code}). Check AQUASWARM_API_KEY."
+            )
+
         response.raise_for_status()
 
         if not response.content:
@@ -108,7 +179,7 @@ class BackendClient:
         This does not duplicate backend logic. It uses the same endpoint
         functions and database layer already implemented in backend/api.py.
         """
-        from backend import api
+        api = _load_inprocess_api()
 
         params = params or {}
         payload = payload or {}
@@ -215,65 +286,46 @@ class BackendClient:
 
         if self.mode == "inprocess" or self._http_failed:
             result = self._request_inprocess(
-                method,
-                endpoint,
-                params=params,
-                payload=payload,
+                method, endpoint, params=params, payload=payload
             )
-            self.mode_label = "BACKEND API (IN-PROCESS)"
+            self.mode_label = "IN-PROCESS"
             return result
+
+        kwargs: dict[str, Any] = {}
+        if params is not None:
+            kwargs["params"] = params
+        if payload is not None:
+            kwargs["json"] = payload
 
         try:
-            kwargs: dict[str, Any] = {}
-            if params is not None:
-                kwargs["params"] = params
-            if payload is not None:
-                kwargs["json"] = payload
-
-            result = self._request_http(
-                method,
-                endpoint,
-                **kwargs,
-            )
-
-            self.mode_label = "BACKEND API (HTTP)"
+            result = self._request_http(method, endpoint, **kwargs)
+            self.mode_label = "HTTP"
             return result
 
-        except (requests.ConnectionError, requests.Timeout):
+        except (requests.ConnectionError, requests.Timeout) as exc:
             if self.mode == "http":
-                raise
+                raise BackendUnavailable(
+                    f"Cannot reach the backend at {self.base_url}: {exc}"
+                ) from exc
 
+            # auto mode: the server is not running, use the in-process API.
             self._http_failed = True
-            self.mode_label = "BACKEND API (IN-PROCESS)"
-
+            self.mode_label = "IN-PROCESS"
             return self._request_inprocess(
-                method,
-                endpoint,
-                params=params,
-                payload=payload,
+                method, endpoint, params=params, payload=payload
             )
 
         except requests.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-
-            # A server-side 5xx means the external API itself failed.
-            # In auto mode, recover through the same FastAPI handlers
-            # in-process. Client validation errors (4xx) are not hidden.
-            if (
-                self.mode == "auto"
-                and status is not None
-                and status >= 500
-            ):
-                self._http_failed = True
-                self.mode_label = "BACKEND API (IN-PROCESS)"
-                return self._request_inprocess(
-                    method,
-                    endpoint,
-                    params=params,
-                    payload=payload,
-                )
-
-            raise
+            status = exc.response.status_code if exc.response is not None else "?"
+            detail = ""
+            try:
+                detail = exc.response.json().get("detail", "")
+            except Exception:
+                pass
+            raise BackendError(
+                f"Backend returned HTTP {status} for {method} {endpoint}"
+                + (f": {detail}" if detail else "")
+            ) from exc
 
     # ------------------------------------------------------------------
     # Public API
@@ -387,3 +439,31 @@ class BackendClient:
 
     def create_agent_run(self, payload):
         return self.post("/agent-runs", payload)
+
+    # ------------------------------------------------------------------
+    # Diagnostics
+    # ------------------------------------------------------------------
+
+    def diagnose(self) -> dict[str, Any]:
+        """Health + data check used by the UI. Never raises."""
+        info: dict[str, Any] = {
+            "ok": False,
+            "mode": self.mode,
+            "label": self.mode_label,
+            "url": self.base_url if self.mode != "inprocess" else "—",
+            "tanks": 0,
+            "suppliers": 0,
+            "error": "",
+        }
+        try:
+            self.health()
+            info["tanks"] = len(self.get_tanks())
+            info["suppliers"] = len(self.get_suppliers())
+            info["label"] = self.mode_label
+            info["ok"] = info["tanks"] > 0
+            if not info["ok"]:
+                info["error"] = "Backend is reachable but contains no tanks."
+        except Exception as exc:
+            info["label"] = self.mode_label
+            info["error"] = f"{type(exc).__name__}: {exc}"
+        return info

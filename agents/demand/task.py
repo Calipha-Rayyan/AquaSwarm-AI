@@ -4,11 +4,7 @@ from crewai import Task
 
 from agents.demand.agent import create_demand_agent
 from models.schemas import DemandResult, WaterData
-from tools.water_tools import (
-    calculate_shortage,
-    calculate_fill_percentage,
-    determine_priority,
-)
+from tools.water_tools import assess_tank, default_policy
 
 
 def _validate_water_data(water_data: WaterData) -> None:
@@ -63,7 +59,7 @@ def _normalise_priority(priority: str) -> str:
 
     if value not in allowed:
         raise ValueError(
-            f"Unexpected priority returned by determine_priority(): {value!r}. "
+            f"Unexpected priority from the water assessment: {value!r}. "
             f"Expected one of {sorted(allowed)}."
         )
 
@@ -74,9 +70,10 @@ def create_demand_task(water_data: WaterData) -> Task:
     """
     Create a demand-analysis task from one WaterData record.
 
-    Shortage, fill percentage, priority, and the current demand estimate are
-    deterministic inputs. The LLM is used for interpretation/reasoning, not to
-    replace those numerical calculations.
+    Shortage, fill percentage, days of cover, priority and the demand
+    estimate are deterministic (tools.water_tools.assess_tank). The LLM only
+    interprets them; the flow re-applies the deterministic values to the
+    structured result so the model can never change them.
     """
     _validate_water_data(water_data)
 
@@ -85,24 +82,16 @@ def create_demand_task(water_data: WaterData) -> Task:
     daily_demand = float(water_data.daily_demand)
     inflow = float(water_data.inflow)
 
-    shortage = float(calculate_shortage(current_level, daily_demand))
-    fill_percentage = float(calculate_fill_percentage(current_level, capacity))
-    priority = _normalise_priority(
-        determine_priority(fill_percentage, shortage)
-    )
+    policy = default_policy()
+    assessment = assess_tank(current_level, capacity, daily_demand, inflow, policy)
+
+    shortage = float(assessment.shortage)
+    fill_percentage = float(assessment.fill_percentage)
+    priority = _normalise_priority(assessment.priority)
+    estimated_demand = daily_demand
 
     if shortage < 0 or not math.isfinite(shortage):
-        raise ValueError("calculate_shortage() returned an invalid value.")
-
-    if not 0 <= fill_percentage <= 100:
-        raise ValueError(
-            "calculate_fill_percentage() must return a value between 0 and 100."
-        )
-
-    # The supplied dataset contains daily_demand rather than a historical
-    # forecasting series. Therefore the current daily demand is the only
-    # evidence-based demand estimate available to this task.
-    estimated_demand = daily_demand
+        raise ValueError("The shortage calculation returned an invalid value.")
 
     agent = create_demand_agent()
 
@@ -114,13 +103,17 @@ Tank data:
 - Current water level: {current_level:g} units
 - Tank capacity: {capacity:g} units
 - Daily demand: {daily_demand:g} units
-- Inflow: {inflow:g} units
+- Inflow: {inflow:g} units per day
 - Timestamp: {water_data.timestamp}
 
 Deterministic management calculations:
 - Estimated demand: {estimated_demand:g} units
-- Water shortage: {shortage:g} units
 - Tank fill percentage: {fill_percentage:.2f}%
+- Days of cover: {assessment.cover_label}
+- Net daily change (inflow - demand): {assessment.net_daily_change:g} units
+- Target reserve level ({policy.reserve_days:g} days of net demand, bounded by
+  {policy.min_operating_fill_pct:g}%-{policy.max_fill_pct:g}% fill): {assessment.target_level:g} units
+- Water shortage (target reserve - current level): {shortage:g} units
 - Priority: {priority}
 
 These deterministic numerical values are authoritative.
@@ -133,11 +126,9 @@ Your job is to:
 5. Explain briefly what the current tank condition means operationally.
 
 Reasoning guidance:
-- A shortage means the current level is insufficient for the supplied demand
-  according to the deterministic shortage calculation.
-- Low fill percentage indicates reduced available reserve.
-- Inflow can be mentioned as supporting context, but it must not be used to
-  replace the authoritative shortage or priority.
+- A shortage means the tank holds less than its target reserve.
+- Days of cover and fill percentage explain how urgent the situation is.
+- If the shortage is 0, state that the reserve is sufficient.
 - Do not invent historical demand, population, seasonal patterns, future
   consumption, or sensor readings that were not supplied.
 - Do not recalculate or modify the deterministic values.

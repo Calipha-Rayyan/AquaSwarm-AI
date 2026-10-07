@@ -1,1199 +1,588 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from html import escape
+from typing import Any, Dict, Iterable, Optional
+
 import streamlit as st
 
-from datetime import datetime, timezone, timedelta
+from ui.theme import dashboard_css
+
+PIPELINE_ORDER = [
+    "Demand",
+    "Anomaly",
+    "Supply",
+    "Allocation",
+    "Approval",
+    "Delivery",
+    "Verification",
+]
+
+SCENARIO_LABELS = {
+    "LIVE": "Live backend data",
+    "DEMAND_SURGE": "Demand surge x2.5",
+    "LOW_LEVEL": "Low tank level",
+    "CRITICAL_LOW": "Critical shortage",
+}
+
+_WAVE_PATH = "M0 10 Q 50 0 100 10 T 200 10 T 300 10 T 400 10 V20 H0Z"
+_WAVE_SVG = (
+    f'<svg viewBox="0 0 400 20" preserveAspectRatio="none">'
+    f'<path d="{_WAVE_PATH}"/></svg>'
+)
+_RIVER_LINE = (
+    '<div class="aq-river-line"><svg viewBox="0 0 800 26" preserveAspectRatio="none">'
+    '<path d="M0 13 Q 50 2 100 13 T 200 13 T 300 13 T 400 13 T 500 13 T 600 13 T 700 13 T 800 13" '
+    'fill="none" stroke="#4de3f0" stroke-opacity=".55" stroke-width="2"/>'
+    '<path d="M0 17 Q 60 7 120 17 T 240 17 T 360 17 T 480 17 T 600 17 T 720 17 T 840 17" '
+    'fill="none" stroke="#8ff5e0" stroke-opacity=".3" stroke-width="1.5"/></svg></div>'
+)
 
 
+# --------------------------------------------------------------------------
+# small helpers
+# --------------------------------------------------------------------------
 
-DASHBOARD_CSS = """
+def esc(value: Any) -> str:
+    """Escape anything that came from an LLM, backend or user."""
+    return escape(str(value), quote=True)
 
-<style>
 
-:root{
+def _n(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return esc(value)
+    return f"{number:,.0f}" if abs(number) >= 100 else f"{number:,.2f}".rstrip("0").rstrip(".")
 
-  --cyan:#43c8ff; --blue:#416cff; --violet:#8b7bff; --green:#4ade80;
 
-  --amber:#ffb84d; --red:#ff6b6b; --text:#e9f2fa; --muted:#8aa0b4; --dim:#5f778d;
+def _get(obj: Any, name: str, default: Any = None) -> Any:
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
 
-  --line:rgba(120,180,225,.13); --panel:linear-gradient(145deg,rgba(17,32,50,.88),rgba(8,19,33,.94));
 
+def _compact(markup: str) -> str:
+    """Remove indentation/newlines so nothing is parsed as markdown code."""
+    return "".join(line.strip() for line in markup.splitlines())
+
+
+def _format_eta(raw: Any) -> str:
+    if not raw or str(raw).upper() == "UNKNOWN" or str(raw) == "—":
+        return "Unknown"
+    try:
+        moment = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        local = moment.astimezone(timezone(timedelta(hours=5)))
+        return local.strftime("%d %b %Y • %I:%M %p PKT")
+    except (ValueError, TypeError):
+        return esc(raw)
+
+
+# --------------------------------------------------------------------------
+# river pipeline
+# --------------------------------------------------------------------------
+
+_STATE_LABEL = {
+    "pending": "Waiting",
+    "running": "Analyzing",
+    "active": "Active",
+    "done": "Completed",
+    "skipped": "Not required",
+    "blocked": "Blocked",
+    "rejected": "Rejected",
+    "error": "Failed",
 }
 
 
-
-/* ---------- canvas ---------- */
-
-.stApp{
-
-  background:
-
-    radial-gradient(circle at 6% 0%,rgba(0,180,255,.11),transparent 34%),
-
-    radial-gradient(circle at 96% 100%,rgba(98,88,255,.11),transparent 34%),
-
-    linear-gradient(135deg,#030911 0%,#061421 50%,#050a14 100%);
-
-}
-
-.stApp::before{
-
-  content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
-
-  background-image:linear-gradient(rgba(90,170,230,.04) 1px,transparent 1px),
-
-                   linear-gradient(90deg,rgba(90,170,230,.04) 1px,transparent 1px);
-
-  background-size:56px 56px;
-
-  -webkit-mask-image:radial-gradient(ellipse at 50% 30%,#000 15%,transparent 80%);
-
-          mask-image:radial-gradient(ellipse at 50% 30%,#000 15%,transparent 80%);
-
-}
-
-[data-testid="stHeader"]{background:transparent;}
-
-[data-testid="stDecoration"],footer{display:none !important;}
-
-.block-container{max-width:1450px; padding-top:3rem; padding-bottom:3rem; position:relative; z-index:1;}
-
-
-
-@keyframes rise{from{opacity:0;transform:translateY(14px);}to{opacity:1;transform:none;}}
-
-@keyframes ping{from{transform:scale(1);opacity:.7;}to{transform:scale(3.2);opacity:0;}}
-
-@keyframes blink{50%{opacity:.35;}}
-
-@keyframes fillIn{from{width:0;}}
-
-@keyframes sheen{from{transform:translateX(-100%);}to{transform:translateX(250%);}}
-
-@keyframes flowline{to{background-position:32px 0;}}
-
-@keyframes nodePulse{0%,100%{box-shadow:0 0 0 0 rgba(67,200,255,.45),0 0 16px rgba(67,200,255,.25);}
-
-                    50%{box-shadow:0 0 0 9px rgba(67,200,255,0),0 0 22px rgba(67,200,255,.4);}}
-
-
-
-/* ---------- header ---------- */
-
-.aq-header{display:flex; justify-content:space-between; align-items:center; min-height:70px;
-
-  margin-bottom:22px; animation:rise .5s ease-out both; gap:16px; flex-wrap:wrap;}
-
-.aq-brand{display:flex; align-items:center; gap:12px; font-size:30px; font-weight:800;
-
-  letter-spacing:-1px; color:#fff;}
-
-.aq-drop{width:18px; height:18px; flex-shrink:0; background:linear-gradient(135deg,#7ee7ff,#2d7bff);
-
-  border-radius:0 50% 50% 50%; transform:rotate(45deg); box-shadow:0 0 18px rgba(67,200,255,.75);}
-
-.aq-brand span.t{background:linear-gradient(100deg,#fff,#8fdcff); -webkit-background-clip:text;
-
-  background-clip:text; color:transparent;}
-
-.aq-subtitle{margin-top:8px; color:var(--muted); font-size:13px; letter-spacing:.3px;}
-
-.aq-right{display:flex; gap:10px; align-items:center; flex-wrap:wrap;}
-
-.aq-chip{color:var(--muted); font-size:11px; font-weight:600; letter-spacing:1.2px; text-transform:uppercase;
-
-  padding:7px 12px; border:1px solid var(--line); border-radius:99px; background:rgba(10,22,38,.6);}
-
-.aq-status{display:flex; align-items:center; gap:9px; color:#65e6a3; font-size:11px; font-weight:650;
-
-  letter-spacing:1.3px; padding:7px 13px; border-radius:99px; text-transform:uppercase;
-
-  border:1px solid rgba(101,230,163,.25); background:rgba(101,230,163,.06); white-space:nowrap;}
-
-.aq-dot{width:8px; height:8px; border-radius:50%; background:var(--green); position:relative; flex-shrink:0;}
-
-.aq-dot::after{content:""; position:absolute; inset:0; border-radius:50%; background:var(--green);
-
-  animation:ping 1.8s ease-out infinite;}
-
-.aq-divider{height:1px; background:linear-gradient(90deg,rgba(67,200,255,.35),var(--line) 30%,transparent);
-
-  margin-bottom:26px;}
-
-
-
-.aq-await{display:flex; align-items:center; gap:12px; padding:14px 18px; margin-bottom:26px;
-
-  border:1px solid rgba(67,200,255,.22); border-radius:12px; background:rgba(67,200,255,.05);
-
-  color:#9fdcf7; font-size:13px; animation:rise .6s .1s ease-out both;}
-
-.aq-await i{width:7px; height:7px; border-radius:50%; background:var(--cyan);
-
-  box-shadow:0 0 10px var(--cyan); animation:blink 1.6s ease-in-out infinite;}
-
-
-
-/* ---------- KPI ---------- */
-
-.kpi-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:30px;}
-
-.kpi-card{position:relative; overflow:hidden; background:var(--panel); border:1px solid var(--line);
-
-  border-radius:16px; padding:22px; min-height:142px; box-sizing:border-box;
-
-  box-shadow:0 14px 36px rgba(0,0,0,.32); animation:rise .6s ease-out both;
-
-  transition:border-color .2s ease,transform .2s ease,box-shadow .2s ease;}
-
-.kpi-card:nth-child(2){animation-delay:.07s;} .kpi-card:nth-child(3){animation-delay:.14s;} .kpi-card:nth-child(4){animation-delay:.21s;}
-
-.kpi-card::before{content:""; position:absolute; top:0; left:0; right:0; height:2px;
-
-  background:linear-gradient(90deg,var(--cyan),var(--blue),transparent);}
-
-.kpi-card:hover{border-color:rgba(67,200,255,.4); transform:translateY(-3px);
-
-  box-shadow:0 20px 44px rgba(0,0,0,.42),0 0 28px rgba(67,200,255,.09);}
-
-.kpi-top{display:flex; justify-content:space-between; align-items:center; margin-bottom:17px;}
-
-.kpi-label{color:var(--muted); font-size:11px; font-weight:700; letter-spacing:1.4px; text-transform:uppercase;}
-
-.kpi-icon{font-size:17px; opacity:.85;}
-
-.kpi-value{color:#fff; font-size:31px; font-weight:750; line-height:1; letter-spacing:-.8px;}
-
-.kpi-unit{color:var(--dim); font-size:13px; font-weight:500; margin-left:5px; letter-spacing:0;}
-
-.kpi-meta{color:var(--dim); font-size:12px; margin-top:12px;}
-
-.priority-badge{display:inline-flex; align-items:center; gap:9px; font-size:31px; font-weight:750; line-height:1;}
-
-.priority-dot{width:9px; height:9px; border-radius:50%; background:currentColor;
-
-  box-shadow:0 0 12px currentColor; animation:blink 1.8s ease-in-out infinite;}
-
-.p-high{color:var(--red);} .p-med{color:var(--amber);} .p-low{color:var(--green);}
-
-
-
-/* ---------- sections ---------- */
-
-.section-heading{display:flex; align-items:center; gap:10px; color:#fff; font-size:17px; font-weight:700;
-
-  letter-spacing:-.3px; margin-bottom:14px;}
-
-.section-heading::before{content:""; width:3px; height:16px; border-radius:2px;
-
-  background:linear-gradient(180deg,var(--cyan),var(--violet));}
-
-.section-caption{color:var(--dim); font-size:12px; margin-top:-7px; margin-bottom:16px; padding-left:13px;}
-
-
-
-.intel-grid{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:34px;}
-
-.intel-card{background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:24px;
-
-  min-height:245px; box-sizing:border-box; box-shadow:0 14px 36px rgba(0,0,0,.3);
-
-  animation:rise .65s .1s ease-out both; transition:border-color .2s ease,box-shadow .2s ease;}
-
-.intel-card:hover{border-color:rgba(67,200,255,.3); box-shadow:0 20px 44px rgba(0,0,0,.4);}
-
-.intel-header{display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:24px;}
-
-.intel-title{color:#fff; font-size:15px; font-weight:700;}
-
-.intel-subtitle{color:var(--dim); font-size:11px; margin-top:5px;}
-
-.tank-id{color:#9fdcf7; font-size:11px; font-weight:700; letter-spacing:1px; padding:6px 10px;
-
-  border:1px solid rgba(67,200,255,.25); border-radius:8px; background:rgba(67,200,255,.06);}
-
-
-
-.tank-level-row{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:12px;}
-
-.tank-current{color:#fff; font-size:32px; font-weight:750; letter-spacing:-.8px;}
-
-.tank-capacity{color:var(--dim); font-size:13px; font-weight:500; letter-spacing:0;}
-
-.tank-bar{position:relative; width:100%; height:16px; background:#0c1724; border:1px solid var(--line);
-
-  border-radius:20px; overflow:hidden; margin-bottom:10px;}
-
-.tank-fill{position:relative; height:100%; border-radius:20px; overflow:hidden;
-
-  background:linear-gradient(90deg,#2878ff,#52d3ff); box-shadow:0 0 18px rgba(82,211,255,.35);
-
-  animation:fillIn 1.3s cubic-bezier(.2,.8,.2,1) both;}
-
-.tank-fill::after{content:""; position:absolute; top:0; bottom:0; width:40%;
-
-  background:linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent);
-
-  animation:sheen 3.2s ease-in-out infinite;}
-
-.tank-fill.low{background:linear-gradient(90deg,#e08a1e,#ffb84d); box-shadow:0 0 18px rgba(255,184,77,.3);}
-
-.tank-percent{display:flex; justify-content:space-between; color:var(--dim); font-size:11px;}
-
-.tank-status{display:flex; align-items:center; gap:8px; margin-top:25px; color:var(--amber); font-size:12px; font-weight:600;}
-
-.tank-status-dot{width:7px; height:7px; border-radius:50%; background:var(--amber); box-shadow:0 0 10px var(--amber);}
-
-.success-status{color:var(--green);}
-
-.success-status-dot{width:7px; height:7px; border-radius:50%; background:var(--green); box-shadow:0 0 10px var(--green);}
-
-
-
-.flow-row{display:flex; justify-content:space-between; align-items:center; padding:13px 0;
-
-  border-bottom:1px solid var(--line);}
-
-.flow-row:last-child{border-bottom:none;}
-
-.flow-label{color:var(--muted); font-size:13px;}
-
-.flow-value{color:#fff; font-size:15px; font-weight:650;}
-
-.flow-value.warning{color:var(--amber);}
-
-.flow-unit{color:var(--dim); font-size:11px; font-weight:400; margin-left:4px;}
-
-
-
-/* ---------- pipeline ---------- */
-
-.workflow-card{position:relative; overflow:hidden; background:var(--panel); border:1px solid var(--line);
-
-  border-radius:16px; padding:26px 24px 24px; margin-bottom:30px; box-shadow:0 14px 36px rgba(0,0,0,.3);
-
-  animation:rise .7s .15s ease-out both;}
-
-.workflow-card::before{content:""; position:absolute; top:0; left:-50%; width:40%; height:1px;
-
-  background:linear-gradient(90deg,transparent,var(--cyan),transparent); animation:sheen 6s ease-in-out infinite;}
-
-.workflow-header{display:flex; justify-content:space-between; align-items:center; margin-bottom:30px; gap:12px; flex-wrap:wrap;}
-
-.workflow-title{color:#fff; font-size:15px; font-weight:700;}
-
-.workflow-operation{color:#9fdcf7; font-size:11px; font-weight:600; letter-spacing:.6px; padding:6px 10px;
-
-  border:1px solid rgba(67,200,255,.22); border-radius:8px; background:rgba(67,200,255,.05);}
-
-.workflow-track{display:flex; align-items:flex-start; width:100%;}
-
-.workflow-step{flex:1; min-width:0; position:relative; text-align:center;}
-
-.workflow-step:not(:last-child)::after{content:""; position:absolute; top:20px; left:calc(50% + 24px);
-
-  right:calc(-50% + 24px); height:2px; background:#1d2a39;}
-
-.workflow-step.completed:not(:last-child)::after{
-
-  background:repeating-linear-gradient(90deg,#4ade80 0 8px,rgba(74,222,128,.3) 8px 16px);
-
-  background-size:32px 100%; animation:flowline 1s linear infinite;}
-
-.workflow-node{position:relative; z-index:2; width:42px; height:42px; margin:0 auto 12px; border-radius:50%;
-
-  display:flex; align-items:center; justify-content:center; font-size:14px; font-weight:700; box-sizing:border-box;
-
-  background:#08182a; transition:transform .2s ease;}
-
-.workflow-step:hover .workflow-node{transform:scale(1.08);}
-
-.workflow-node.completed{border:1.5px solid rgba(74,222,128,.7); color:var(--green); box-shadow:0 0 16px rgba(74,222,128,.22);}
-
-.workflow-node.active{border:1.5px solid var(--cyan); color:var(--cyan); animation:nodePulse 2s ease-in-out infinite;}
-
-.workflow-node.pending{border:1.5px solid #2a3a4c; color:var(--dim);}
-
-.workflow-node.skipped{border:1.5px dashed #26323f; color:#44505d;}
-
-.workflow-name{color:#d4e4f1; font-size:11px; font-weight:700; letter-spacing:1.2px; text-transform:uppercase; white-space:nowrap;}
-
-.workflow-step.human .workflow-name::after{content:"HUMAN"; display:block; margin:5px auto 0; width:max-content;
-
-  font-size:8px; letter-spacing:1.4px; color:#a89cff; padding:2px 6px; border:1px solid rgba(139,123,255,.35); border-radius:99px;}
-
-.workflow-state{font-size:10px; margin-top:6px; letter-spacing:.3px;}
-
-.workflow-state.completed{color:var(--green);} .workflow-state.active{color:var(--cyan);}
-
-.workflow-state.pending{color:var(--dim);} .workflow-state.skipped{color:#44505d;}
-
-
-
-.no-operation-card{background:var(--panel); border:1px solid rgba(74,222,128,.22); border-radius:16px;
-
-  padding:26px 28px; margin-bottom:30px; box-shadow:0 0 40px rgba(74,222,128,.04); animation:rise .6s ease-out both;}
-
-.no-operation-header{display:flex; align-items:center; gap:14px;}
-
-.no-operation-icon{width:38px; height:38px; flex-shrink:0; border-radius:50%; display:flex; align-items:center;
-
-  justify-content:center; background:rgba(74,222,128,.1); border:1px solid rgba(74,222,128,.4);
-
-  color:var(--green); font-size:16px; font-weight:700; box-shadow:0 0 18px rgba(74,222,128,.2);}
-
-.no-operation-title{color:#fff; font-size:15px; font-weight:700;}
-
-.no-operation-description{color:var(--muted); font-size:12px; margin-top:4px;}
-
-
-
-/* ---------- manager approval ---------- */
-
-.approval-card{
-
-  position:relative;
-
-  overflow:hidden;
-
-  background:var(--panel);
-
-  border:1px solid rgba(139,123,255,.34);
-
-  border-radius:16px;
-
-  padding:24px;
-
-  margin-bottom:30px;
-
-  box-shadow:0 14px 36px rgba(0,0,0,.3),0 0 30px rgba(139,123,255,.06);
-
-  animation:rise .65s ease-out both;
-
-}
-
-.approval-card::before{
-
-  content:"";
-
-  position:absolute;
-
-  top:0;
-
-  left:0;
-
-  right:0;
-
-  height:2px;
-
-  background:linear-gradient(90deg,var(--violet),var(--cyan),transparent);
-
-}
-
-.approval-header{
-
-  display:flex;
-
-  justify-content:space-between;
-
-  align-items:flex-start;
-
-  gap:16px;
-
-  margin-bottom:20px;
-
-}
-
-.approval-title{
-
-  color:#fff;
-
-  font-size:15px;
-
-  font-weight:700;
-
-}
-
-.approval-subtitle{
-
-  color:var(--dim);
-
-  font-size:11px;
-
-  margin-top:5px;
-
-}
-
-.approval-badge{
-
-  color:#a89cff;
-
-  font-size:10px;
-
-  font-weight:700;
-
-  letter-spacing:1.2px;
-
-  text-transform:uppercase;
-
-  padding:6px 10px;
-
-  border-radius:99px;
-
-  border:1px solid rgba(139,123,255,.35);
-
-  background:rgba(139,123,255,.08);
-
-  white-space:nowrap;
-
-}
-
-.approval-alert{
-
-  display:flex;
-
-  align-items:center;
-
-  gap:9px;
-
-  color:#c8bdff;
-
-  font-size:12px;
-
-  padding:11px 13px;
-
-  margin-bottom:18px;
-
-  border-radius:10px;
-
-  border:1px solid rgba(139,123,255,.18);
-
-  background:rgba(139,123,255,.05);
-
-}
-
-.approval-alert-dot{
-
-  width:7px;
-
-  height:7px;
-
-  flex-shrink:0;
-
-  border-radius:50%;
-
-  background:var(--violet);
-
-  box-shadow:0 0 10px var(--violet);
-
-  animation:blink 1.6s ease-in-out infinite;
-
-}
-
-
-
-/* ---------- readiness / errors ---------- */
-.aq-ready-card{position:relative;display:flex;align-items:center;gap:16px;padding:22px 24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(10,26,43,.94),rgba(8,18,31,.98));border:1px solid rgba(67,200,255,.2);border-radius:16px;box-shadow:0 14px 36px rgba(0,0,0,.28);animation:rise .55s ease-out both;}
-.aq-ready-icon{display:flex;align-items:center;justify-content:center;width:42px;height:42px;border-radius:12px;color:var(--cyan);background:rgba(67,200,255,.08);border:1px solid rgba(67,200,255,.25);font-weight:800;}
-.aq-ready-title{color:#fff;font-size:15px;font-weight:750;}
-.aq-ready-text{color:var(--muted);font-size:12px;line-height:1.55;margin-top:5px;}
-.aq-ready-tag{margin-left:auto;color:#9fdcf7;font-size:9px;font-weight:750;letter-spacing:1.3px;padding:7px 10px;border-radius:99px;border:1px solid rgba(67,200,255,.22);background:rgba(67,200,255,.05);white-space:nowrap;}
-.aq-feature-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:30px;}
-.aq-feature{padding:20px;border:1px solid var(--line);border-radius:16px;background:rgba(9,20,34,.72);box-shadow:0 10px 26px rgba(0,0,0,.22);}
-.aq-feature-kicker{color:var(--cyan);font-size:9px;font-weight:750;letter-spacing:1.4px;}
-.aq-feature-title{color:#fff;font-size:14px;font-weight:700;margin-top:8px;}
-.aq-feature-text{color:var(--dim);font-size:11px;line-height:1.55;margin-top:6px;}
-.aq-error-card{display:flex;align-items:center;gap:15px;padding:20px 22px;margin-bottom:28px;background:linear-gradient(135deg,rgba(62,18,24,.5),rgba(20,13,20,.82));border:1px solid rgba(255,107,107,.28);border-radius:16px;}
-.aq-error-icon{display:flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:11px;color:#ff9c9c;background:rgba(255,107,107,.08);border:1px solid rgba(255,107,107,.28);font-weight:800;}
-
-/* ---------- responsive ---------- */
-
-@media (max-width:1000px){
-
-  .kpi-grid{grid-template-columns:repeat(2,1fr);} .intel-grid{grid-template-columns:1fr;}
-
-  .workflow-track{overflow-x:auto; padding-bottom:10px;} .workflow-step{min-width:120px;} .aq-feature-grid{grid-template-columns:1fr;} .aq-ready-tag{display:none;}
-
-}
-
-@media (max-width:600px){
-
-  .kpi-grid{grid-template-columns:1fr;} .aq-brand{font-size:24px;}
-
-}
-
-@media (prefers-reduced-motion:reduce){
-
-  *,*::before,*::after{animation:none !important; transition:none !important;}
-
-}
-
-</style>
-
-"""
-
-
-
-
-
+def _stage_label(name: str, status: str) -> str:
+    if name == "Approval":
+        return {"running": "AI review", "active": "Awaiting decision", "done": "Approved"}.get(
+            status, _STATE_LABEL.get(status, status.title())
+        )
+    if name == "Delivery" and status == "active":
+        return "In transit"
+    if name == "Verification" and status == "blocked":
+        return "Review required"
+    if name == "Verification" and status == "done":
+        return "Verified"
+    return _STATE_LABEL.get(status, status.title())
+
+
+def pipeline_html(
+    stages: Dict[str, Any],
+    fresh: Optional[Iterable[str]] = None,
+    order: Optional[list] = None,
+) -> str:
+    """The agent pipeline drawn as a river of connected pools."""
+    fresh_set = set(fresh or [])
+    names = list(order or PIPELINE_ORDER)
+    if "Replanning" in stages and "Replanning" not in names:
+        names.append("Replanning")
+
+    parts = []
+    previous_status = "pending"
+    for index, name in enumerate(names, start=1):
+        record = stages.get(name)
+        status = str(_get(record, "status", "pending"))
+        detail = str(_get(record, "detail", "") or "")
+        human = name == "Approval"
+        is_fresh = name in fresh_set
+
+        # water flows into a stage once the previous stage has completed
+        if status == "skipped" or status == "blocked" and previous_status != "done":
+            link = "dead"
+        elif previous_status == "done" and status in {"running", "active"}:
+            link = "flow"
+        elif previous_status == "done" and status in {"done", "rejected", "error", "blocked"}:
+            link = "full"
+        else:
+            link = ""
+        if link == "full" and is_fresh:
+            link += " fresh"
+
+        symbol = {
+            "done": "✓", "skipped": "—", "blocked": "!", "error": "✕", "rejected": "✕",
+        }.get(status, str(index))
+
+        classes = f"stage {status}{' human' if human else ''}{' fresh' if is_fresh else ''}"
+        parts.append(
+            f'<div class="{classes}">'
+            f'<div class="link {link}"><div class="w"></div><i class="drop"></i><i class="drop d2"></i></div>'
+            f'<div class="node"><span class="ring"></span><span class="swirl"></span>{symbol}</div>'
+            f'<div class="txt"><div class="sname">{esc(name)}</div>'
+            f'<div class="sstate">{esc(_stage_label(name, status))}</div>'
+            f'<div class="sdetail">{esc(detail)}</div></div></div>'
+        )
+        previous_status = status if name != "Replanning" else previous_status
+
+    return f'<div class="river">{"".join(parts)}</div>'
+
+
+def live_html(state: Any, fresh: Optional[Iterable[str]] = None) -> str:
+    """Compact live view shown while the agents are working."""
+    stages = _get(state, "stages", {}) or {}
+    tank = esc(_get(state, "selected_tank_id", "—"))
+    scenario = str(_get(state, "scenario", "LIVE"))
+    status = esc(_get(state, "operation_status", "Running"))
+    activity = list(_get(state, "activity", []) or [])[-6:]
+
+    rows = "".join(
+        f'<div class="li {esc(a.get("level", "info"))}"><span class="t">{esc(a.get("time", ""))}</span>'
+        f'<span class="a">{esc(a.get("agent", ""))}</span><span class="m">{esc(a.get("message", ""))}</span></div>'
+        for a in reversed(activity)
+    )
+    sim = (
+        f'<span class="aq-chip sim">Simulation · {esc(SCENARIO_LABELS.get(scenario, scenario))}</span>'
+        if scenario != "LIVE" else ""
+    )
+    return _compact(
+        f"""
+        <div class="aq">
+          <div class="card river-card">
+            <div class="rhead">
+              <div><div class="rtitle">Agents are flowing through {tank}</div>
+              <div class="rop">{status}</div></div>
+              <div class="aq-right">{sim}<span class="aq-chip">Live</span></div>
+            </div>
+            {pipeline_html(stages, fresh)}
+          </div>
+          <div class="card" style="margin-top:14px"><div class="ctitle">Agent activity</div>
+          <div class="log" style="margin-top:8px">{rows or '<div class="li"><span class="m">Starting…</span></div>'}</div></div>
+        </div>
+        """
+    )
+
+
+# --------------------------------------------------------------------------
+# pieces
+# --------------------------------------------------------------------------
+
+def _tank_html(fill: float, capacity: float, level: float, target: float, critical_pct: float, low: bool) -> str:
+    fill = min(max(fill, 0.0), 100.0)
+    target_pct = min(max(target / capacity * 100.0, 0.0), 100.0) if capacity else 0.0
+    water_cls = "water low" if low else "water"
+    return (
+        f'<div class="tank">'
+        f'<div class="{water_cls}" style="height:{fill:.1f}%">'
+        f'<div class="wave">{_WAVE_SVG}</div><div class="wave b">{_WAVE_SVG}</div>'
+        f'<div class="bubbles"><i></i><i></i><i></i></div></div>'
+        f'<div class="mark" style="bottom:{target_pct:.1f}%"><span>TARGET</span></div>'
+        f'<div class="mark crit" style="bottom:{critical_pct:.1f}%"><span>CRITICAL</span></div>'
+        f'<div class="tank-pct">{fill:.0f}%</div></div>'
+    )
+
+
+def _supplier_table(supply_result: Any, ranking: list) -> str:
+    recommended = _get(supply_result, "recommended_supplier")
+    required = None
+    rows = []
+    for option in _get(supply_result, "suppliers", []) or []:
+        sid = str(_get(option, "supplier_id"))
+        available = _get(option, "available")
+        qty = float(_get(option, "available_quantity", 0))
+        if sid == recommended:
+            cls, pill = "rec", '<span class="pill rec">RECOMMENDED</span>'
+        elif sid in ranking:
+            cls, pill = "", f'<span class="pill el">ELIGIBLE #{ranking.index(sid) + 1}</span>'
+        elif available is False:
+            cls, pill = "", '<span class="pill off">UNAVAILABLE</span>'
+        else:
+            cls, pill = "", '<span class="pill no">TOO SMALL</span>'
+        eta = _get(option, "eta_minutes")
+        rows.append(
+            f'<tr class="{cls}"><td><b>{esc(sid)}</b><br><span style="color:#8fb7c4;font-size:11px">{esc(_get(option, "name", ""))}</span></td>'
+            f'<td>{_n(qty)}</td><td>{_n(_get(option, "distance_km", 0))} km</td>'
+            f'<td>{_n(_get(option, "estimated_cost", 0))}</td>'
+            f'<td>{esc(eta) + " min" if eta is not None else "—"}</td><td>{pill}</td></tr>'
+        )
+    return (
+        '<div class="tablescroll"><table class="sup"><tr><th>Supplier</th><th>Available</th>'
+        '<th>Distance</th><th>Cost</th><th>ETA</th><th>Status</th></tr>' + "".join(rows) + "</table></div>"
+    )
+
+
+def _banner(kind: str, title: str, text: str) -> str:
+    icon = {"err": "!", "warn": "i", "ok": "✓"}[kind]
+    return (
+        f'<div class="banner {kind}"><div class="ic">{icon}</div>'
+        f'<div><b>{esc(title)}</b><br>{esc(text)}</div></div>'
+    )
+
+
+# --------------------------------------------------------------------------
+# main renderer
+# --------------------------------------------------------------------------
 
 def render_dashboard(
     workflow_state=None,
     approval_handler=None,
     delivery_completion_handler=None,
+    run_error: str = "",
+    backend_status: Optional[dict] = None,
 ):
     """Render the AquaSwarm manager dashboard from the current flow state."""
+    st.html(dashboard_css())
 
-    water_data = getattr(workflow_state, "water_data", None)
-    demand_result = getattr(workflow_state, "demand_result", None)
-    anomaly_result = getattr(workflow_state, "anomaly_result", None)
-    supply_result = getattr(workflow_state, "supply_result", None)
-    allocation_result = getattr(workflow_state, "allocation_result", None)
-    approval_result = getattr(workflow_state, "manager_approval_result", None)
-    delivery_result = getattr(workflow_state, "delivery_result", None)
-    verification_result = getattr(workflow_state, "verification_result", None)
-    replanning_result = getattr(workflow_state, "replanning_result", None)
+    state = workflow_state
+    water = _get(state, "water_data")
+    demand = _get(state, "demand_result")
+    anomaly = _get(state, "anomaly_result")
+    supply = _get(state, "supply_result")
+    allocation = _get(state, "allocation_result")
+    recommendation = _get(state, "approval_recommendation")
+    approval = _get(state, "manager_approval_result")
+    delivery = _get(state, "delivery_result")
+    verification = _get(state, "verification_result")
+    replanning = _get(state, "replanning_result")
+    stages = _get(state, "stages", {}) or {}
+    assessment = _get(state, "assessment") or {}
+    status_text = str(_get(state, "operation_status", "Ready"))
+    scenario = str(_get(state, "scenario", "LIVE"))
+    data_source = str(_get(state, "data_source", ""))
 
-    operation_status = str(
-        getattr(workflow_state, "operation_status", "Pending")
-    )
-
-    tank_id = getattr(water_data, "tank_id", "—")
-    current_level = float(getattr(water_data, "current_level", 0))
-    capacity = float(getattr(water_data, "capacity", 1))
-    daily_demand = float(getattr(water_data, "daily_demand", 0))
-    inflow = float(getattr(water_data, "inflow", 0))
-
-    fill_percentage = (
-        min(max((current_level / capacity) * 100, 0), 100)
-        if capacity > 0 else 0
-    )
-
-    shortage = float(
-        getattr(demand_result, "shortage", max(daily_demand - current_level, 0))
-    )
-    priority = str(getattr(demand_result, "priority", "LOW")).upper()
-
-    no_replenishment = shortage <= 0
-    replenishment_required = shortage > 0
-
-    supplier_id = getattr(
-        allocation_result,
-        "supplier_id",
-        getattr(supply_result, "recommended_supplier", "—"),
-    )
-    allocated_quantity = float(
-        getattr(allocation_result, "allocated_quantity", shortage or 0)
-    )
-
-    approved = getattr(approval_result, "approved", None)
-    approval_status = (
-        "Approved" if approved is True
-        else "Rejected" if approved is False
-        else "Pending"
-    )
-
-    raw_delivery_status = str(
-        getattr(delivery_result, "status", "NOT_STARTED")
-    ).upper().replace(" ", "_")
-    delivery_status = {
-        "IN_TRANSIT": "DISPATCHED",
-    }.get(raw_delivery_status, raw_delivery_status)
-
-    delivery_quantity = float(
-        getattr(delivery_result, "quantity", allocated_quantity)
-    )
-
-    estimated_arrival_raw = getattr(
-        delivery_result, "estimated_arrival", "—"
-    )
-    estimated_arrival = "—"
-
-    if estimated_arrival_raw and str(estimated_arrival_raw) != "—":
-        try:
-            arrival_dt = datetime.fromisoformat(
-                str(estimated_arrival_raw).replace("Z", "+00:00")
-            )
-            if arrival_dt.tzinfo is None:
-                arrival_dt = arrival_dt.replace(timezone=timezone.utc)
-            arrival_dt = arrival_dt.astimezone(
-                timezone(timedelta(hours=5))
-            )
-            estimated_arrival = arrival_dt.strftime(
-                "%d %b %Y • %I:%M %p PKT"
-            )
-        except (ValueError, TypeError):
-            estimated_arrival = str(estimated_arrival_raw)
-
-    verified = getattr(verification_result, "verified", None)
-    verification_raw_status = str(
-        getattr(verification_result, "status", "")
-    ).upper().replace(" ", "_")
-    verification_status = (
-        "Verified" if verified is True
-        else "Review Required"
-        if verification_raw_status == "REVIEW_REQUIRED" or verified is False
-        else "Waiting for Delivery"
-        if delivery_status in {"DISPATCHED", "DELIVERED"} and verification_result is None
-        else "Not Started"
-    )
-
-    priority_class = {
-        "HIGH": "p-high",
-        "MEDIUM": "p-med",
-        "LOW": "p-low",
-    }.get(priority, "p-med")
-
-    tank_fill_class = (
-        "low" if fill_percentage < 40 and replenishment_required else ""
-    )
-
-    st.html(DASHBOARD_CSS)
+    backend_ok = bool(backend_status and backend_status.get("ok"))
+    chips = [f'<span class="aq-chip">{esc(status_text)}</span>']
+    if scenario != "LIVE":
+        chips.append(f'<span class="aq-chip sim">Simulation · {esc(SCENARIO_LABELS.get(scenario, scenario))}</span>')
+    if data_source and data_source != "Pending":
+        chips.append(f'<span class="aq-chip ok">{esc(data_source)}</span>')
+    elif backend_status is not None:
+        chips.append(
+            f'<span class="aq-chip {"ok" if backend_ok else "bad"}">'
+            f'{"Backend " + esc(backend_status.get("label", "")) if backend_ok else "Backend unavailable"}</span>'
+        )
 
     st.html(
-        f"""
-        <div class="aq-header">
-            <div>
-                <div class="aq-brand">
-                    <span class="aq-drop"></span>
-                    <span class="t">AquaSwarm AI</span>
-                </div>
-                <div class="aq-subtitle">
-                    Intelligent Water Operations Control Center
-                </div>
-            </div>
-            <div class="aq-right">
-                <span class="aq-chip">{operation_status}</span>
-                <div class="aq-status">
-                    <span class="aq-dot"></span>
-                    <span>{"Local data fallback" if getattr(workflow_state, "backend_sync_error", "") else "System Operational"}</span>
-                </div>
-            </div>
-        </div>
-        <div class="aq-divider"></div>
-        """
+        _compact(
+            f"""
+            <div class="aq"><div class="aq-header">
+              <div><div class="aq-brand"><span class="aq-drop"></span>AquaSwarm AI</div>
+              <div class="aq-sub">Intelligent water operations · from source to tank</div></div>
+              <div class="aq-right">{"".join(chips)}</div></div>{_RIVER_LINE}</div>
+            """
+        )
     )
 
-    # Never show synthetic zero-valued KPIs before an operation has actually
-    # loaded tank data. The previous UI made a failed flow look successful.
-    if workflow_state is None:
+    if run_error:
+        st.html(_compact(f'<div class="aq">{_banner("err", "The operation could not complete", run_error)}</div>'))
+
+    if state is None:
         st.html(
-            """
-            <div class="aq-ready-card">
-              <div class="aq-ready-icon">◈</div>
-              <div>
-                <div class="aq-ready-title">Ready for a water operation</div>
-                <div class="aq-ready-text">Select a tank in the control panel, then run the AI pipeline. Live API data is preferred; local CSV data is used automatically when the API is offline.</div>
-              </div>
-              <div class="aq-ready-tag">MANAGER CONTROL</div>
-            </div>
-            <div class="aq-feature-grid">
-              <div class="aq-feature"><div class="aq-feature-kicker">01 · MONITOR</div><div class="aq-feature-title">Demand + anomaly detection</div><div class="aq-feature-text">AquaSwarm evaluates tank level, demand, inflow and operational risk.</div></div>
-              <div class="aq-feature"><div class="aq-feature-kicker">02 · DECIDE</div><div class="aq-feature-title">Supply + allocation</div><div class="aq-feature-text">Eligible suppliers are ranked before a controlled allocation is prepared.</div></div>
-              <div class="aq-feature"><div class="aq-feature-kicker">03 · AUTHORIZE</div><div class="aq-feature-title">Human approval gate</div><div class="aq-feature-text">Delivery cannot start until a manager explicitly approves the recommendation.</div></div>
-            </div>
-            """
+            _compact(
+                """
+                <div class="aq"><div class="card ready"><div class="big-drop"></div><div>
+                <div class="ctitle" style="font-size:20px">Ready for a water operation</div>
+                <div class="csub" style="font-size:13px;margin-top:6px">Pick a tank in the control panel and run the pipeline.
+                Data comes from the secured backend API; agents then analyse demand, detect anomalies, rank suppliers and
+                propose an allocation for your approval.</div></div></div>
+                <div class="features">
+                <div class="card"><div class="fk">01 · MONITOR</div><div class="ft">Demand + anomaly detection</div>
+                <div class="fx">Days of cover, fill level and net balance decide the priority.</div></div>
+                <div class="card"><div class="fk">02 · DECIDE</div><div class="ft">Supply + allocation</div>
+                <div class="fx">Suppliers are filtered and ranked deterministically, then sized to the shortage.</div></div>
+                <div class="card"><div class="fk">03 · AUTHORIZE</div><div class="ft">Human approval gate</div>
+                <div class="fx">Nothing is dispatched until a manager approves it.</div></div></div></div>
+                """
+            )
         )
         return
 
-    # A partial flow state means initialization failed. Surface the failure
-    # instead of rendering 0/0 KPIs and a misleading success message.
-    if water_data is None:
-        error_detail = getattr(workflow_state, "backend_sync_error", "") or "The operation stopped before tank data was loaded."
-        st.html(
-            f"""
-            <div class="aq-error-card">
-              <div class="aq-error-icon">!</div>
-              <div>
-                <div class="aq-ready-title">Operation could not start</div>
-                <div class="aq-ready-text">{error_detail}</div>
-              </div>
-            </div>
-            """
-        )
+    if water is None:
+        message = _get(state, "error_message") or "The operation stopped before tank data was loaded."
+        st.html(_compact(f'<div class="aq">{_banner("err", "Backend data unavailable", message)}</div>'))
         return
 
+    tank_id = str(_get(water, "tank_id", "—"))
+    level = float(_get(water, "current_level", 0))
+    capacity = float(_get(water, "capacity", 1)) or 1.0
+    demand_per_day = float(_get(water, "daily_demand", 0))
+    inflow = float(_get(water, "inflow", 0))
+    fill = float(assessment.get("fill_percentage", level / capacity * 100))
+    target = float(assessment.get("target_level", 0))
+    shortage = float(_get(demand, "shortage", assessment.get("shortage", 0)) or 0)
+    priority = str(_get(demand, "priority", assessment.get("priority", "LOW"))).upper()
+    cover_label = str(assessment.get("cover_label", "—"))
+    net_change = float(assessment.get("net_daily_change", inflow - demand_per_day))
+    needs_water = shortage > 0
+
+    error_message = str(_get(state, "error_message", "") or "")
+    if error_message and status_text == "Pipeline Error":
+        st.html(_compact(f'<div class="aq">{_banner("err", "A pipeline stage failed", error_message)}</div>'))
+
+    # ---- KPIs
     st.html(
-        f"""
-        <div class="kpi-grid">
-            <div class="kpi-card">
-                <div class="kpi-top">
-                    <span class="kpi-label">Current Level</span>
-                    <span class="kpi-icon">💧</span>
-                </div>
-                <div class="kpi-value">{current_level:g}
-                    <span class="kpi-unit">units</span>
-                </div>
-                <div class="kpi-meta">{fill_percentage:.0f}% of tank capacity</div>
-            </div>
-
-            <div class="kpi-card">
-                <div class="kpi-top">
-                    <span class="kpi-label">Daily Demand</span>
-                    <span class="kpi-icon">📈</span>
-                </div>
-                <div class="kpi-value">{daily_demand:g}
-                    <span class="kpi-unit">units</span>
-                </div>
-                <div class="kpi-meta">Required daily volume</div>
-            </div>
-
-            <div class="kpi-card">
-                <div class="kpi-top">
-                    <span class="kpi-label">Inflow</span>
-                    <span class="kpi-icon">↗</span>
-                </div>
-                <div class="kpi-value">{inflow:g}
-                    <span class="kpi-unit">units</span>
-                </div>
-                <div class="kpi-meta">Current incoming supply</div>
-            </div>
-
-            <div class="kpi-card">
-                <div class="kpi-top">
-                    <span class="kpi-label">Priority</span>
-                    <span class="kpi-icon">⚠</span>
-                </div>
-                <div class="priority-badge {priority_class}">
-                    <span class="priority-dot"></span>
-                    {priority}
-                </div>
-                <div class="kpi-meta">
-                    {"No replenishment required" if no_replenishment else "Operational attention level"}
-                </div>
-            </div>
-        </div>
-        """
-    )
-
-    st.html(
-        """
-        <div class="section-heading">Tank Intelligence</div>
-        <div class="section-caption">
-            Live operational condition and water balance
-        </div>
-        """
-    )
-
-    tank_status_text = (
-        "Low storage level — replenishment required"
-        if replenishment_required and fill_percentage < 40
-        else "Storage level within operating range"
-    )
-
-    st.html(
-        f"""
-        <div class="intel-grid">
-            <div class="intel-card">
-                <div class="intel-header">
-                    <div>
-                        <div class="intel-title">Tank Status</div>
-                        <div class="intel-subtitle">Current storage level</div>
-                    </div>
-                    <div class="tank-id">{tank_id}</div>
-                </div>
-
-                <div class="tank-level-row">
-                    <div class="tank-current">
-                        {current_level:g}
-                        <span class="tank-capacity">/ {capacity:g} units</span>
-                    </div>
-                    <div class="tank-capacity">{fill_percentage:.0f}% filled</div>
-                </div>
-
-                <div class="tank-bar">
-                    <div
-                        class="tank-fill {tank_fill_class}"
-                        style="width: {fill_percentage:.1f}%"
-                    ></div>
-                </div>
-
-                <div class="tank-percent">
-                    <span>0 units</span>
-                    <span>{capacity:g} units</span>
-                </div>
-
-                <div class="tank-status {"success-status" if no_replenishment else ""}">
-                    <span class="{"success-status-dot" if no_replenishment else "tank-status-dot"}"></span>
-                    {"Sufficient water available — no replenishment needed" if no_replenishment else tank_status_text}
-                </div>
-            </div>
-
-            <div class="intel-card">
-                <div class="intel-header">
-                    <div>
-                        <div class="intel-title">Demand &amp; Supply</div>
-                        <div class="intel-subtitle">Current water balance</div>
-                    </div>
-                </div>
-                <div class="flow-row">
-                    <span class="flow-label">Daily demand</span>
-                    <span class="flow-value">{daily_demand:g}<span class="flow-unit">units</span></span>
-                </div>
-                <div class="flow-row">
-                    <span class="flow-label">Current inflow</span>
-                    <span class="flow-value">{inflow:g}<span class="flow-unit">units</span></span>
-                </div>
-                <div class="flow-row">
-                    <span class="flow-label">Calculated shortage</span>
-                    <span class="flow-value {"warning" if replenishment_required else ""}">
-                        {shortage:g}<span class="flow-unit">units</span>
-                    </span>
-                </div>
-                <div class="flow-row">
-                    <span class="flow-label">Operational priority</span>
-                    <span class="flow-value">{priority}</span>
-                </div>
-            </div>
-        </div>
-        """
-    )
-
-    if no_replenishment:
-        st.html(
+        _compact(
             f"""
-            <div class="no-operation-card">
-                <div class="no-operation-header">
-                    <div class="no-operation-icon">✓</div>
-                    <div>
-                        <div class="no-operation-title">No Replenishment Required</div>
-                        <div class="no-operation-description">
-                            {tank_id} has sufficient water available.
-                            AquaSwarm stopped procurement and delivery because
-                            the calculated shortage is 0 units.
-                        </div>
-                    </div>
-                </div>
-            </div>
+            <div class="aq"><div class="kpis">
+              <div class="card"><div class="kpi-label"><span>Current level</span><span>💧</span></div>
+                <div class="kpi-value">{_n(level)}<span class="kpi-unit">units</span></div>
+                <div class="kpi-meta">{fill:.0f}% of {_n(capacity)} capacity</div></div>
+              <div class="card"><div class="kpi-label"><span>Days of cover</span><span>⏳</span></div>
+                <div class="kpi-value">{esc(cover_label.replace(" days", ""))}<span class="kpi-unit">{"days" if "days" in cover_label else ""}</span></div>
+                <div class="kpi-meta">Net change {net_change:+,.0f} units/day</div></div>
+              <div class="card"><div class="kpi-label"><span>Daily demand</span><span>📈</span></div>
+                <div class="kpi-value">{_n(demand_per_day)}<span class="kpi-unit">units</span></div>
+                <div class="kpi-meta">Inflow {_n(inflow)} units/day</div></div>
+              <div class="card"><div class="kpi-label"><span>Shortage</span><span>🌊</span></div>
+                <div class="kpi-value">{_n(shortage)}<span class="kpi-unit">units</span></div>
+                <div class="kpi-meta">{"Below target reserve of " + _n(target) if needs_water else "Reserve is sufficient"}</div></div>
+              <div class="card"><div class="kpi-label"><span>Priority</span><span>⚠</span></div>
+                <div class="pbadge p-{priority.lower()}"><i></i>{esc(priority)}</div>
+                <div class="kpi-meta">{"Replenishment needed" if needs_water else "No replenishment required"}</div></div>
+            </div></div>
             """
         )
-
-    st.html(
-        """
-        <div class="section-heading">AI Agent Workflow</div>
-        <div class="section-caption">
-            Autonomous decision pipeline with human authorization
-        </div>
-        """
     )
 
-    def step(
-        name,
-        number,
-        done=False,
-        active=False,
-        state="Pending",
-        human=False,
-        skipped=False,
-    ):
-        # Preserve the richer workflow-state animation from the earlier branch:
-        # skipped stages are rendered as disabled/dashed nodes instead of looking
-        # like unfinished work. Active and completed stages keep their animations.
-        if skipped:
-            cls = "skipped"
-        elif active:
-            cls = "active"
-        elif done:
-            cls = "completed"
-        else:
-            cls = "pending"
-
-        extra = " human" if human else ""
-
-        if skipped:
-            symbol = "—"
-        elif active:
-            symbol = "→"
-        elif done:
-            symbol = "✓"
-        else:
-            symbol = str(number)
-
-        return f"""
-        <div class="workflow-step {cls}{extra}">
-            <div class="workflow-node {cls}">{symbol}</div>
-            <div class="workflow-name">{name}</div>
-            <div class="workflow-state {cls}">{state}</div>
-        </div>
-        """
-
-    demand_done = demand_result is not None
-    anomaly_done = anomaly_result is not None
-    supply_done = supply_result is not None
-    allocation_done = allocation_result is not None
-    approval_done = approval_result is not None
-
-    delivery_dispatched = delivery_status == "DISPATCHED"
-    delivery_delivered = delivery_status in {"DELIVERED", "VERIFIED"}
-
-    verification_done = verification_result is not None
-
-    if replenishment_required:
-        steps = "".join(
-            [
-                step("Demand", 1, demand_done, state="Completed" if demand_done else "Pending"),
-                step("Anomaly", 2, anomaly_done, state="Completed" if anomaly_done else "Pending"),
-                step("Supply", 3, supply_done, state="Completed" if supply_done else "Pending"),
-                step("Allocation", 4, allocation_done, state="Completed" if allocation_done else "Pending"),
-                step(
-                    "Approval", 5, approval_done,
-                    active=operation_status == "Awaiting Manager Approval",
-                    state=approval_status if approval_done else "Awaiting Decision",
-                    human=True,
-                ),
-                step(
-                    "Delivery", 6, delivery_delivered,
-                    active=delivery_dispatched,
-                    state=delivery_status.title() if delivery_result is not None else "Pending",
-                ),
-                step(
-                    "Verification", 7, verification_done,
-                    active=delivery_delivered and not verification_done,
-                    state=verification_status,
-                ),
-            ]
+    # ---- Tank intelligence
+    st.html('<div class="aq"><div class="aq-h">Tank Intelligence</div><div class="aq-c">Live condition and water balance</div></div>')
+    low = fill < 40 and needs_water
+    tank_text = (
+        "Below target reserve — replenishment required"
+        if needs_water else "Storage level within operating range"
+    )
+    st.html(
+        _compact(
+            f"""
+            <div class="aq"><div class="grid2">
+              <div class="card"><div class="chead"><div><div class="ctitle">Tank status</div>
+                <div class="csub">Current storage level</div></div><div class="tag">{esc(tank_id)}</div></div>
+                <div class="tankwrap">{_tank_html(fill, capacity, level, target, 20.0, low)}
+                  <div class="tank-info"><div class="big">{_n(level)}<small>/ {_n(capacity)} units</small></div>
+                    <div class="meter"><i style="width:{min(max(fill, 0), 100):.1f}%"></i></div>
+                    <div class="csub">{fill:.0f}% filled · target reserve {_n(target)}</div>
+                    <div class="stat-line"><span class="dot {"" if needs_water else "ok"}"></span>{esc(tank_text)}</div></div></div></div>
+              <div class="card"><div class="chead"><div><div class="ctitle">Water balance</div>
+                <div class="csub">Deterministic assessment</div></div></div>
+                <div class="row"><span class="l">Daily demand</span><span class="v">{_n(demand_per_day)}<small>units</small></span></div>
+                <div class="row"><span class="l">Daily inflow</span><span class="v">{_n(inflow)}<small>units</small></span></div>
+                <div class="row"><span class="l">Net daily change</span><span class="v {"warn" if net_change < 0 else "good"}">{net_change:+,.0f}<small>units</small></span></div>
+                <div class="row"><span class="l">Target reserve</span><span class="v">{_n(target)}<small>units</small></span></div>
+                <div class="row"><span class="l">Calculated shortage</span><span class="v {"warn" if needs_water else "good"}">{_n(shortage)}<small>units</small></span></div>
+                <div class="row"><span class="l">Anomaly check</span><span class="v">{esc(_get(anomaly, "anomaly_type", "—") or "NONE").replace("_", " ").title() if anomaly else "—"}</span></div>
+              </div></div></div>
+            """
         )
-    else:
-        steps = step("Demand", 1, True, state="Completed")
-        for name in ("Anomaly", "Supply", "Allocation", "Approval", "Delivery", "Verification"):
-            # Skipped stages use the branch version's disabled visual state.
-            steps += step(name, "", state="Not Required", skipped=True)
-
-    st.html(
-        f"""
-        <div class="workflow-card">
-            <div class="workflow-header">
-                <div class="workflow-title">AquaSwarm Decision Pipeline</div>
-                <div class="workflow-operation">
-                    {tank_id} · {allocated_quantity:g} units
-                </div>
-            </div>
-            <div class="workflow-track">{steps}</div>
-        </div>
-        """
     )
 
-    if (
+    if not needs_water and status_text == "No Replenishment Required":
+        st.html(
+            _compact(
+                f'<div class="aq">{_banner("ok", "No replenishment required", f"{tank_id} holds more than its target reserve, so procurement and delivery were skipped. Anomaly monitoring still ran.")}</div>'
+            )
+        )
+
+    # ---- Pipeline
+    op_line = f"{tank_id}" + (f" · {_n(_get(allocation, 'allocated_quantity'))} units" if allocation else "")
+    st.html('<div class="aq"><div class="aq-h">AI Agent Workflow</div><div class="aq-c">Autonomous decision pipeline with human authorization</div></div>')
+    replan_html = ""
+    if replanning is not None:
+        replan_html = (
+            '<div class="replan"><div class="node" style="border-color:#9bb4ff;color:#9bb4ff">↺</div>'
+            f'<div><b>Replanning</b> · {esc(_get(replanning, "action", "")).replace("_", " ").title()} — {esc(_get(replanning, "reason", ""))}</div></div>'
+        )
+    pipeline_stages = {k: v for k, v in stages.items() if k != "Replanning"}
+    st.html(
+        _compact(
+            f"""<div class="aq"><div class="card river-card"><div class="rhead">
+            <div class="rtitle">AquaSwarm Decision Pipeline</div><div class="rop">{esc(op_line)}</div></div>
+            {pipeline_html(pipeline_stages)}{replan_html}</div></div>"""
+        )
+    )
+
+    # ---- Approval gate
+    awaiting = (
         approval_handler is not None
-        and approval_result is None
-        and allocation_result is not None
-        and operation_status == "Awaiting Manager Approval"
-        and replenishment_required
-    ):
+        and approval is None
+        and allocation is not None
+        and status_text == "Awaiting Manager Approval"
+    )
+    if awaiting:
+        rec_html = ""
+        if recommendation is not None:
+            ok = bool(_get(recommendation, "approved"))
+            rec_html = (
+                f'<div class="ai-rec"><span class="badge {"ok" if ok else "no"}">AI REVIEW · {esc(_get(recommendation, "manager_decision", ""))}</span>'
+                f'<div>{esc(_get(recommendation, "reasoning", ""))}</div></div>'
+            )
         st.html(
-            f"""
-            <div class="approval-card">
-                <div class="approval-header">
-                    <div>
-                        <div class="approval-title">Manager Approval Required</div>
-                        <div class="approval-subtitle">
-                            Human authorization is required before delivery can begin
-                        </div>
-                    </div>
-                    <div class="approval-badge">Awaiting Decision</div>
-                </div>
-                <div class="approval-alert">
-                    <span class="approval-alert-dot"></span>
-                    <span>Review the AI allocation and authorize the proposed water movement.</span>
-                </div>
-                <div class="intel-grid">
-                    <div class="intel-card">
-                        <div class="intel-header">
-                            <div>
-                                <div class="intel-title">Proposed Allocation</div>
-                                <div class="intel-subtitle">AI-generated recommendation</div>
-                            </div>
-                            <div class="tank-id">{tank_id}</div>
-                        </div>
-                        <div class="flow-row">
-                            <span class="flow-label">Requested quantity</span>
-                            <span class="flow-value">{allocated_quantity:g}<span class="flow-unit">units</span></span>
-                        </div>
-                        <div class="flow-row">
-                            <span class="flow-label">Recommended supplier</span>
-                            <span class="flow-value">{supplier_id}</span>
-                        </div>
-                        <div class="flow-row">
-                            <span class="flow-label">Operational priority</span>
-                            <span class="flow-value">{priority}</span>
-                        </div>
-                    </div>
-                    <div class="intel-card">
-                        <div class="intel-header">
-                            <div>
-                                <div class="intel-title">Decision Control</div>
-                                <div class="intel-subtitle">Manager authorization</div>
-                            </div>
-                        </div>
-                        <div class="flow-row">
-                            <span class="flow-label">Current status</span>
-                            <span class="flow-value warning">Awaiting Approval</span>
-                        </div>
-                        <div class="flow-row">
-                            <span class="flow-label">Next step</span>
-                            <span class="flow-value">Delivery after approval</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            """
+            _compact(
+                f"""
+                <div class="aq"><div class="card approval"><div class="chead"><div>
+                  <div class="ctitle" style="font-size:18px">Manager approval required</div>
+                  <div class="csub">Nothing is dispatched until you authorize it</div></div>
+                  <div class="tag" style="color:#9bb4ff;border-color:rgba(155,180,255,.45)">AWAITING DECISION</div></div>
+                  <div class="grid2" style="margin-top:6px"><div>
+                    <div class="row"><span class="l">Quantity</span><span class="v">{_n(_get(allocation, "allocated_quantity"))}<small>units</small></span></div>
+                    <div class="row"><span class="l">Supplier</span><span class="v">{esc(_get(allocation, "supplier_id"))}</span></div>
+                    <div class="row"><span class="l">Priority</span><span class="v">{esc(_get(allocation, "priority"))}</span></div></div>
+                    <div class="note"><b>Allocation reasoning</b><br>{esc(_get(allocation, "reasoning", ""))}</div></div>
+                  {rec_html}</div></div>
+                """
+            )
         )
-
         reason = st.text_area(
             "Manager decision note",
             key=f"manager_approval_reason_{tank_id}",
-            placeholder="Add a short reason for the approval or rejection...",
+            placeholder="Add a short reason for the approval or rejection…",
             height=90,
         )
-
         approve_col, reject_col = st.columns(2)
-
         with approve_col:
-            if st.button(
-                "✓  APPROVE ALLOCATION",
-                key=f"approve_allocation_{tank_id}",
-                use_container_width=True,
-                type="primary",
-            ):
-                try:
-                    success = approval_handler(True, reason.strip())
-                    if success is not False:
-                        st.rerun()
-                except Exception as exc:
-                    st.error(f"Approval failed: {exc}")
-
+            if st.button("✓  APPROVE ALLOCATION", key=f"approve_allocation_{tank_id}",
+                         use_container_width=True, type="primary"):
+                if approval_handler(True, reason.strip()) is not False:
+                    st.rerun()
         with reject_col:
-            if st.button(
-                "✕  REJECT ALLOCATION",
-                key=f"reject_allocation_{tank_id}",
-                use_container_width=True,
-            ):
-                try:
-                    success = approval_handler(False, reason.strip())
-                    if success is not False:
-                        st.rerun()
-                except Exception as exc:
-                    st.error(f"Rejection failed: {exc}")
+            if st.button("✕  REJECT ALLOCATION", key=f"reject_allocation_{tank_id}",
+                         use_container_width=True):
+                if approval_handler(False, reason.strip()) is not False:
+                    st.rerun()
 
-    # Physical delivery completion is deliberately a separate action.
-    # It prevents a DISPATCHED delivery from being automatically verified.
+    # ---- Delivery receipt (separate physical action)
+    delivery_status = str(_get(delivery, "status", "")).upper()
     if (
         delivery_completion_handler is not None
-        and approval_result is not None
-        and approval_result.approved
-        and delivery_result is not None
+        and approval is not None
+        and _get(approval, "approved")
+        and delivery is not None
         and delivery_status == "DISPATCHED"
     ):
         st.html(
-            """
-            <div class="approval-card">
-                <div class="approval-title">Delivery Completion</div>
-                <div class="approval-subtitle">
-                    Enter the physically measured quantity received before verification.
-                </div>
-            </div>
-            """
+            _compact(
+                '<div class="aq"><div class="card approval"><div class="ctitle" style="font-size:18px">Delivery completion</div>'
+                '<div class="csub">Enter the physically measured quantity received before verification.</div></div></div>'
+            )
         )
-
-        actual_quantity = st.number_input(
-            "Actual delivered quantity",
-            min_value=0.0,
-            value=float(allocated_quantity),
-            step=1.0,
+        actual = st.number_input(
+            "Actual delivered quantity", min_value=0.0,
+            value=float(_get(allocation, "allocated_quantity", 0)), step=1.0,
             key=f"actual_delivery_quantity_{tank_id}",
         )
+        if st.button("✓  CONFIRM DELIVERY RECEIVED", key=f"confirm_delivery_{tank_id}",
+                     use_container_width=True, type="primary"):
+            if delivery_completion_handler(actual) is not False:
+                st.rerun()
 
-        if st.button(
-            "✓  CONFIRM DELIVERY RECEIVED",
-            key=f"confirm_delivery_{tank_id}",
-            use_container_width=True,
-            type="primary",
-        ):
-            try:
-                success = delivery_completion_handler(actual_quantity)
-                if success is not False:
-                    st.rerun()
-            except Exception as exc:
-                st.error(f"Delivery completion failed: {exc}")
-
-    if delivery_result is not None and replenishment_required:
+    # ---- Supplier ranking
+    if supply is not None:
         st.html(
-            f"""
-            <div class="section-heading">Current Operation</div>
-            <div class="section-caption">
-                Active water movement and fulfillment status
-            </div>
-            <div class="intel-grid">
-                <div class="intel-card">
-                    <div class="intel-header">
-                        <div>
-                            <div class="intel-title">Delivery</div>
-                            <div class="intel-subtitle">Approved water movement</div>
-                        </div>
-                        <div class="tank-id">{supplier_id}</div>
-                    </div>
-                    <div class="flow-row">
-                        <span class="flow-label">Quantity</span>
-                        <span class="flow-value">{delivery_quantity:g}<span class="flow-unit">units</span></span>
-                    </div>
-                    <div class="flow-row">
-                        <span class="flow-label">Status</span>
-                        <span class="flow-value">{delivery_status}</span>
-                    </div>
-                    <div class="flow-row">
-                        <span class="flow-label">Estimated arrival</span>
-                        <span class="flow-value">{estimated_arrival}</span>
-                    </div>
-                </div>
-                <div class="intel-card">
-                    <div class="intel-header">
-                        <div>
-                            <div class="intel-title">Verification</div>
-                            <div class="intel-subtitle">Delivery confirmation</div>
-                        </div>
-                    </div>
-                    <div class="flow-row">
-                        <span class="flow-label">Verification status</span>
-                        <span class="flow-value">{verification_status}</span>
-                    </div>
-                    <div class="flow-row">
-                        <span class="flow-label">Approved quantity</span>
-                        <span class="flow-value">{allocated_quantity:g}<span class="flow-unit">units</span></span>
-                    </div>
-                    <div class="flow-row">
-                        <span class="flow-label">Actual quantity</span>
-                        <span class="flow-value">{delivery_quantity:g}<span class="flow-unit">units</span></span>
-                    </div>
-                    <div class="flow-row">
-                        <span class="flow-label">Discrepancy</span>
-                        <span class="flow-value">
-                            {getattr(verification_result, "discrepancy", 0):g}
-                            <span class="flow-unit">units</span>
-                        </span>
-                    </div>
-                </div>
-            </div>
-            """
+            _compact(
+                f"""<div class="aq"><div class="aq-h">Supplier Ranking</div>
+                <div class="aq-c">Eligibility and ranking are deterministic: cost, then distance, then capacity</div>
+                <div class="card">{_supplier_table(supply, list(_get(state, "supply_ranking", []) or []))}
+                <div class="note"><b>Supply agent</b> · {esc(_get(supply, "reasoning", ""))}</div></div></div>"""
+            )
         )
 
-    if replanning_result is not None:
+    # ---- Delivery + verification
+    if delivery is not None:
+        verified = _get(verification, "verified")
+        v_text = (
+            "Verified" if verified is True
+            else "Review required" if verified is False
+            else "Waiting for delivery"
+        )
+        approved_qty = _get(allocation, "allocated_quantity", 0)
         st.html(
-            f"""
-            <div class="approval-card">
-                <div class="approval-title">Replanning Required</div>
-                <div class="approval-subtitle">
-                    AquaSwarm identified a recovery action for the current operation.
-                </div>
-                <div class="flow-row">
-                    <span class="flow-label">Action</span>
-                    <span class="flow-value">{replanning_result.action}</span>
-                </div>
-                <div class="flow-row">
-                    <span class="flow-label">Reason</span>
-                    <span class="flow-value">{replanning_result.reason}</span>
-                </div>
-            </div>
-            """
+            _compact(
+                f"""
+                <div class="aq"><div class="aq-h">Current Operation</div><div class="aq-c">Water movement and fulfilment</div>
+                <div class="grid2">
+                <div class="card"><div class="chead"><div><div class="ctitle">Delivery</div><div class="csub">Approved water movement</div></div>
+                  <div class="tag">{esc(_get(delivery, "supplier_id"))}</div></div>
+                  <div class="row"><span class="l">Quantity</span><span class="v">{_n(_get(delivery, "quantity"))}<small>units</small></span></div>
+                  <div class="row"><span class="l">Status</span><span class="v">{esc(delivery_status.title())}</span></div>
+                  <div class="row"><span class="l">Estimated arrival</span><span class="v">{_format_eta(_get(delivery, "estimated_arrival"))}</span></div></div>
+                <div class="card"><div class="chead"><div><div class="ctitle">Verification</div><div class="csub">Delivery confirmation</div></div></div>
+                  <div class="row"><span class="l">Result</span><span class="v {"good" if verified is True else "warn" if verified is False else ""}">{v_text}</span></div>
+                  <div class="row"><span class="l">Approved quantity</span><span class="v">{_n(approved_qty)}<small>units</small></span></div>
+                  <div class="row"><span class="l">Actual quantity</span><span class="v">{_n(_get(delivery, "quantity"))}<small>units</small></span></div>
+                  <div class="row"><span class="l">Discrepancy</span><span class="v">{_n(_get(verification, "discrepancy", 0))}<small>units</small></span></div></div>
+                </div></div>
+                """
+            )
         )
 
-    backend_sync_error = getattr(workflow_state, "backend_sync_error", "")
-    if backend_sync_error:
-        st.warning(backend_sync_error)
+    updated = _get(state, "updated_level")
+    if updated is not None and verification is not None and _get(verification, "verified"):
+        st.html(
+            _compact(
+                f'<div class="aq">{_banner("ok", "Loop closed", f"The verified delivery was recorded. {tank_id} is now at {_n(updated)} units, so the next run uses the new level to set priority.")}</div>'
+            )
+        )
+
+    # ---- warnings
+    sync_warnings = list(_get(state, "sync_warnings", []) or [])
+    llm_warnings = list(_get(state, "llm_warnings", []) or [])
+    if llm_warnings:
+        st.html(
+            _compact(
+                f'<div class="aq">{_banner("warn", "AI agents were unavailable for some stages", "Deterministic results were used for those stages. Check GEMINI_API_KEY and model access. First error: " + llm_warnings[0])}</div>'
+            )
+        )
+    if sync_warnings:
+        st.html(
+            _compact(
+                f'<div class="aq">{_banner("warn", "Backend sync notice", sync_warnings[-1])}</div>'
+            )
+        )
+
+    # ---- activity log
+    activity = list(_get(state, "activity", []) or [])
+    if activity:
+        rows = "".join(
+            f'<div class="li {esc(a.get("level", "info"))}"><span class="t">{esc(a.get("time", ""))}</span>'
+            f'<span class="a">{esc(a.get("agent", ""))}</span><span class="m">{esc(a.get("message", ""))}</span></div>'
+            for a in reversed(activity[-40:])
+        )
+        st.html(
+            _compact(
+                f'<div class="aq"><div class="aq-h">Agent Activity</div><div class="aq-c">Audit trail for operation {esc(_get(state, "operation_id", ""))}</div>'
+                f'<div class="card"><div class="log">{rows}</div></div></div>'
+            )
+        )

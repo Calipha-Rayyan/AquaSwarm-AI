@@ -2,73 +2,73 @@ from __future__ import annotations
 
 import hmac
 import os
-from pathlib import Path
+from typing import Any
 
-import pandas as pd
+from backend.client import BackendClient, BackendUnavailable
 
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-DATA_DIR = BASE_DIR / "data"
+def _setting(name: str, default: str = "") -> str:
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return value
+    try:  # Streamlit secrets (sectioned or non-env secrets)
+        import streamlit as st
+
+        if name in st.secrets:
+            return str(st.secrets[name])
+    except Exception:
+        pass
+    return default
 
 
 def authenticate(email: str, password: str) -> bool:
-    """Authenticate the prototype manager session from environment settings."""
-    expected_email = os.getenv(
-        "AQUASWARM_DEMO_EMAIL",
-        "demo@aquaswarm.ai",
-    ).strip().lower()
-    expected_password = os.getenv(
-        "AQUASWARM_DEMO_PASSWORD",
-        "AquaSwarm@123",
-    )
+    """Authenticate the prototype manager session from environment settings.
+
+    Set AQUASWARM_DEMO_EMAIL / AQUASWARM_DEMO_PASSWORD in .env or Streamlit
+    secrets. The built-in demo values are only a convenience for local use.
+    """
+    expected_email = _setting("AQUASWARM_DEMO_EMAIL", "demo@aquaswarm.ai").strip().lower()
+    expected_password = _setting("AQUASWARM_DEMO_PASSWORD", "AquaSwarm@123")
 
     return (
-        hmac.compare_digest(email.strip().lower(), expected_email)
-        and hmac.compare_digest(password, expected_password)
+        hmac.compare_digest(email.strip().lower().encode(), expected_email.encode())
+        & hmac.compare_digest(password.encode(), expected_password.encode())
+    )
+
+
+def using_default_credentials() -> bool:
+    return not _setting("AQUASWARM_DEMO_PASSWORD")
+
+
+def build_client() -> BackendClient:
+    """One place that builds the backend client from settings."""
+    from config.settings import (
+        AQUASWARM_BACKEND_MODE,
+        AQUASWARM_BACKEND_TIMEOUT,
+        AQUASWARM_BACKEND_URL,
+    )
+
+    return BackendClient(
+        base_url=AQUASWARM_BACKEND_URL,
+        timeout=AQUASWARM_BACKEND_TIMEOUT,
+        mode=AQUASWARM_BACKEND_MODE,
     )
 
 
 def get_tank_options() -> list[str]:
-    """Load tank codes from the backend and fall back to data/tanks.csv."""
-    backend_url = os.getenv(
-        "AQUASWARM_API_URL",
-        "http://127.0.0.1:8000",
-    ).rstrip("/")
+    """Tank codes from the backend API. There is no CSV fallback: a failure
+    raises with the real reason so it can be shown and fixed."""
+    rows = build_client().get_tanks()
+    codes = [str(row["tank_code"]) for row in rows if row.get("tank_code")]
+    if not codes:
+        raise BackendUnavailable("The backend returned no tanks.")
+    return list(dict.fromkeys(codes))
 
+
+def get_backend_status() -> dict[str, Any]:
+    """Health/data check for the sidebar. Never raises."""
     try:
-        from backend.client import BackendClient
-
-        from config.settings import AQUASWARM_BACKEND_TIMEOUT
-
-        rows = BackendClient(
-            base_url=backend_url,
-            timeout=AQUASWARM_BACKEND_TIMEOUT,
-        ).get_tanks()
-        values = [
-            str(row["tank_code"])
-            for row in rows
-            if row.get("tank_code")
-        ]
-        if values:
-            return list(dict.fromkeys(values))
-    except Exception:
-        pass
-
-    path = DATA_DIR / "tanks.csv"
-    if not path.exists():
-        return []
-
-    data = pd.read_csv(path)
-
-    if "tank_code" in data.columns:
-        return (
-            data["tank_code"].astype(str).dropna().drop_duplicates().tolist()
-        )
-
-    if "id" in data.columns:
-        return [
-            f"TANK-{int(value):03d}"
-            for value in data["id"].dropna().drop_duplicates()
-        ]
-
-    return []
+        return build_client().diagnose()
+    except Exception as exc:  # e.g. settings import failure
+        return {"ok": False, "label": "?", "mode": "?", "url": "—", "tanks": 0,
+                "suppliers": 0, "error": f"{type(exc).__name__}: {exc}"}
