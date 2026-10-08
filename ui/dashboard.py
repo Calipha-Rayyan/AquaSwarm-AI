@@ -19,9 +19,9 @@ PIPELINE_ORDER = [
 ]
 
 SCENARIO_LABELS = {
-    "LIVE": "Live backend data",
-    "DEMAND_SURGE": "Demand surge x2.5",
-    "LOW_LEVEL": "Low tank level",
+    "LIVE": "Live conditions",
+    "DEMAND_SURGE": "Demand surge",
+    "LOW_LEVEL": "Low reserve",
     "CRITICAL_LOW": "Critical shortage",
 }
 
@@ -176,7 +176,7 @@ def live_html(state: Any, fresh: Optional[Iterable[str]] = None) -> str:
         for a in reversed(activity)
     )
     sim = (
-        f'<span class="aq-chip sim">Simulation · {esc(SCENARIO_LABELS.get(scenario, scenario))}</span>'
+        f'<span class="aq-chip sim">Scenario · {esc(SCENARIO_LABELS.get(scenario, scenario))}</span>'
         if scenario != "LIVE" else ""
     )
     return _compact(
@@ -284,17 +284,14 @@ def render_dashboard(
     scenario = str(_get(state, "scenario", "LIVE"))
     data_source = str(_get(state, "data_source", ""))
 
-    backend_ok = bool(backend_status and backend_status.get("ok"))
     chips = [f'<span class="aq-chip">{esc(status_text)}</span>']
     if scenario != "LIVE":
-        chips.append(f'<span class="aq-chip sim">Simulation · {esc(SCENARIO_LABELS.get(scenario, scenario))}</span>')
-    if data_source and data_source != "Pending":
-        chips.append(f'<span class="aq-chip ok">{esc(data_source)}</span>')
-    elif backend_status is not None:
-        chips.append(
-            f'<span class="aq-chip {"ok" if backend_ok else "bad"}">'
-            f'{"Backend " + esc(backend_status.get("label", "")) if backend_ok else "Backend unavailable"}</span>'
-        )
+        chips.append(f'<span class="aq-chip sim">Scenario · {esc(SCENARIO_LABELS.get(scenario, scenario))}</span>')
+    ai_used = set(_get(state, "ai_agents", []) or [])
+    if ai_used:
+        chips.append(f'<span class="aq-chip ok">AI agents active · {len(ai_used)}</span>')
+    elif _get(state, "llm_warnings", []):
+        chips.append('<span class="aq-chip bad">AI agents unavailable</span>')
 
     st.html(
         _compact(
@@ -316,9 +313,8 @@ def render_dashboard(
                 """
                 <div class="aq"><div class="card ready"><div class="big-drop"></div><div>
                 <div class="ctitle" style="font-size:20px">Ready for a water operation</div>
-                <div class="csub" style="font-size:13px;margin-top:6px">Pick a tank in the control panel and run the pipeline.
-                Data comes from the secured backend API; agents then analyse demand, detect anomalies, rank suppliers and
-                propose an allocation for your approval.</div></div></div>
+                <div class="csub" style="font-size:13px;margin-top:6px">Select a tank in the control panel and start an operation. The agents assess demand, check for anomalies,
+                compare suppliers and propose an allocation for your approval.</div></div></div>
                 <div class="features">
                 <div class="card"><div class="fk">01 · MONITOR</div><div class="ft">Demand + anomaly detection</div>
                 <div class="fx">Days of cover, fill level and net balance decide the priority.</div></div>
@@ -333,7 +329,7 @@ def render_dashboard(
 
     if water is None:
         message = _get(state, "error_message") or "The operation stopped before tank data was loaded."
-        st.html(_compact(f'<div class="aq">{_banner("err", "Backend data unavailable", message)}</div>'))
+        st.html(_compact(f'<div class="aq">{_banner("err", "Tank data unavailable", message)}</div>'))
         return
 
     tank_id = str(_get(water, "tank_id", "—"))
@@ -562,13 +558,13 @@ def render_dashboard(
     if llm_warnings:
         st.html(
             _compact(
-                f'<div class="aq">{_banner("warn", "AI agents were unavailable for some stages", "Deterministic results were used for those stages. Check GEMINI_API_KEY and model access. First error: " + llm_warnings[0])}</div>'
+                f'<div class="aq">{_banner("warn", "AI analysis was unavailable for some stages", "Standard operating rules were applied to those stages, so the safety limits still hold. Details: " + llm_warnings[0])}</div>'
             )
         )
     if sync_warnings:
         st.html(
             _compact(
-                f'<div class="aq">{_banner("warn", "Backend sync notice", sync_warnings[-1])}</div>'
+                f'<div class="aq">{_banner("warn", "Notice", sync_warnings[-1])}</div>'
             )
         )
 

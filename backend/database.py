@@ -74,10 +74,24 @@ REQUIRED_SCHEMA = {
 # DATABASE CONNECTION
 # ============================================================
 
+class _ClosingConnection(sqlite3.Connection):
+    """sqlite3's own `with` block only commits or rolls back; it never closes.
+    Unclosed connections keep aquaswarm.db locked, which on Windows blocks
+    rename/delete (WinError 32). This subclass closes on leaving `with`."""
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
+
+
 def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(
         DATABASE_NAME,
         check_same_thread=False,
+        timeout=15,  # wait for another process's lock instead of failing at once
+        factory=_ClosingConnection,
     )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -340,20 +354,40 @@ def schema_is_compatible() -> bool:
 
 
 def backup_incompatible_database() -> Path:
-    timestamp = datetime.now().strftime(
-        "%Y%m%d_%H%M%S"
-    )
+    """Keep a copy of an old-layout database, then clear its tables in place.
 
-    backup_path = PROJECT_ROOT / (
-        f"aquaswarm_legacy_{timestamp}.db"
-    )
+    The file itself is never deleted or renamed, so this works on Windows even
+    when another program (uvicorn, DB Browser, an editor plugin) has it open.
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = PROJECT_ROOT / f"aquaswarm_legacy_{timestamp}.db"
 
-    shutil.copy2(
-        DATABASE_PATH,
-        backup_path,
-    )
+    # SQLite's online backup API copies a consistent snapshot of an open file.
+    source = sqlite3.connect(DATABASE_NAME, timeout=15)
+    try:
+        target = sqlite3.connect(str(backup_path))
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    finally:
+        source.close()
 
-    DATABASE_PATH.unlink()
+    conn = sqlite3.connect(DATABASE_NAME, timeout=15)
+    try:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        names = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        ]
+        for name in names:
+            conn.execute(f'DROP TABLE IF EXISTS "{name}"')
+        conn.commit()
+    finally:
+        conn.close()
 
     return backup_path
 

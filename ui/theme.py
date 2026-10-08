@@ -54,7 +54,17 @@ def base_css() -> str:
 @keyframes aqDriftB{{from{{background-position-x:-1200px}}to{{background-position-x:0}}}}
 
 [data-testid="stHeader"],[data-testid="stDecoration"]{{background:transparent;}}
-[data-testid="stToolbar"],footer{{display:none !important;}}
+footer,#MainMenu,.stDeployButton,[data-testid="stAppDeployButton"],
+[data-testid="stToolbarActions"],[data-testid="stStatusWidget"]{{display:none !important;}}
+/* never hide the control that re-opens the sidebar */
+[data-testid="stExpandSidebarButton"],[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"],[data-testid="stSidebarCollapseButton"]{{
+  display:flex !important;visibility:visible !important;opacity:1 !important;}}
+[data-testid="stExpandSidebarButton"],[data-testid="collapsedControl"],[data-testid="stSidebarCollapsedControl"]{{
+  position:relative;z-index:999999;background:rgba(5,43,64,.92) !important;border:1px solid rgba(120,225,240,.35) !important;
+  border-radius:12px !important;box-shadow:0 6px 20px rgba(0,0,0,.35);}}
+[data-testid="stExpandSidebarButton"] *,[data-testid="collapsedControl"] *,[data-testid="stSidebarCollapsedControl"] *,
+[data-testid="stSidebarCollapseButton"] *{{color:#4de3f0 !important;fill:#4de3f0 !important;}}
 .block-container{{max-width:1280px; padding-top:1.2rem; padding-bottom:5rem; position:relative; z-index:1;}}
 .stApp, .stApp p, .stApp label, .stApp span{{color:var(--mist);}}
 .stApp h1,.stApp h2,.stApp h3{{color:#f2fdff !important;}}

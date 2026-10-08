@@ -1,16 +1,12 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
 import streamlit as st
 
-from ui.components import (
-    authenticate,
-    build_network_svg,
-    get_backend_status,
-    get_tank_options,
-)
+from ui.components import authenticate, build_network_svg, get_tank_options
 from ui.components.auth import using_default_credentials
 from ui.dashboard import live_html, render_dashboard
 from ui.theme import base_css, dashboard_css
@@ -22,6 +18,10 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+log = logging.getLogger("aquaswarm")
+if using_default_credentials():
+    log.warning("Default login credentials are active; set AQUASWARM_DEMO_PASSWORD.")
 
 MAX_LOGIN_FAILURES = 5
 LOCKOUT_SECONDS = 60
@@ -243,22 +243,12 @@ def render_login() -> None:
                     else:
                         st.error("Invalid email or password.")
 
-            if using_default_credentials():
-                st.caption(
-                    "Demo credentials are active. Set AQUASWARM_DEMO_PASSWORD "
-                    "before sharing this app."
-                )
             st.markdown('<p class="secure">🔒 Authorized personnel only</p>', unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
 # Main app
 # ---------------------------------------------------------------------------
-
-@st.cache_data(ttl=15, show_spinner=False)
-def _backend_status() -> dict:
-    return get_backend_status()
-
 
 def render_app() -> None:
     st.session_state.setdefault("authenticated", False)
@@ -280,21 +270,12 @@ def render_app() -> None:
         unsafe_allow_html=True,
     )
 
-    status = _backend_status()
-
     try:
         tank_options = get_tank_options()
     except Exception as exc:
-        render_dashboard(
-            None,
-            run_error=f"Backend data unavailable — {exc}",
-            backend_status=status,
-        )
-        if st.sidebar.button("↻ Retry backend connection", use_container_width=True):
-            _backend_status.clear()
+        render_dashboard(None, run_error=f"Tank data unavailable — {exc}")
+        if st.sidebar.button("Try again", use_container_width=True):
             st.rerun()
-        with st.sidebar.expander("Diagnostics"):
-            st.json(status)
         return
 
     selected_default = st.session_state.get("selected_tank_id", tank_options[0])
@@ -308,19 +289,14 @@ def render_app() -> None:
 
     scenario_keys = list(SCENARIOS)
     scenario = st.sidebar.selectbox(
-        "Data scenario",
+        "Operating scenario",
         scenario_keys,
         format_func=lambda key: SCENARIOS[key],
         key="scenario",
         help=(
-            "Live uses the tank's real backend reading. The other scenarios "
-            "change the reading in memory to demonstrate how priority reacts "
-            "and never write to the backend."
+            "Live conditions use the tank's current reading. The other "
+            "scenarios stress-test the response and never change real tank levels."
         ),
-    )
-    st.sidebar.caption(
-        "Live data is the default. Simulations exercise the full pipeline "
-        "without touching real tank levels."
     )
 
     workflow_state = st.session_state.get("workflow_state")
@@ -359,21 +335,11 @@ def render_app() -> None:
         st.session_state.run_error = ""
         st.rerun()
 
-    with st.sidebar.expander("Backend status"):
-        dot = "🟢" if status.get("ok") else "🔴"
-        st.markdown(f"{dot} **{status.get('label', '?')}** · {status.get('tanks', 0)} tanks · {status.get('suppliers', 0)} suppliers")
-        if status.get("error"):
-            st.caption(status["error"])
-        if st.button("Re-check", key="recheck_backend", use_container_width=True):
-            _backend_status.clear()
-            st.rerun()
-
     render_dashboard(
         st.session_state.workflow_state,
         approval_handler=handle_manager_decision,
         delivery_completion_handler=handle_delivery_completion,
         run_error=st.session_state.get("run_error", ""),
-        backend_status=status,
     )
 
 

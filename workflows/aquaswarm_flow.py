@@ -57,10 +57,10 @@ STAGE_ORDER = [
 # What-if scenarios change only the in-memory reading. They never write to
 # the backend, so simulated water can never reach the real tank levels.
 SCENARIOS: Dict[str, str] = {
-    "LIVE": "Live backend data",
-    "DEMAND_SURGE": "Demand surge (demand x2.5)",
-    "LOW_LEVEL": "Low tank level (28% fill)",
-    "CRITICAL_LOW": "Critical shortage (8% fill, demand x1.5)",
+    "LIVE": "Live conditions",
+    "DEMAND_SURGE": "Demand surge",
+    "LOW_LEVEL": "Low reserve",
+    "CRITICAL_LOW": "Critical shortage",
 }
 
 _ALLOWED_REPLAN_ACTIONS = {
@@ -142,6 +142,7 @@ class AquaSwarmState(BaseModel):
     activity: List[Dict[str, str]] = Field(default_factory=list)
     sync_warnings: List[str] = Field(default_factory=list)
     llm_warnings: List[str] = Field(default_factory=list)
+    ai_agents: List[str] = Field(default_factory=list)
 
     data_source: str = "Pending"
     # Kept so older UI code that reads it keeps working; always empty now
@@ -262,13 +263,14 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
             structured = getattr(result, "pydantic", None)
             if structured is None:
                 raise RuntimeError("the agent did not return a structured result")
+            self.state.ai_agents.append(label)
             return structured, ""
         except Exception as exc:
             message = f"{label}: {type(exc).__name__}: {exc}"
             self.state.llm_warnings.append(message[:300])
             self._log(
                 label,
-                "AI response unavailable — deterministic result used",
+                "AI response unavailable — standard rules applied",
                 "warn",
             )
             return None, message
@@ -297,7 +299,7 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
         selected = self._normalise_tank_code(self.state.selected_tank_id)
         self.state.selected_tank_id = selected
         self.state.operation_status = "Initializing"
-        self._log("Observe", f"Loading {selected} from the backend")
+        self._log("Observe", f"Reading live data for {selected}")
 
         try:
             client = self._backend()
@@ -334,11 +336,11 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
                 timestamp=_now_iso(),
             )
             self.state.site_id = int(tank["site_id"])
-            self.state.data_source = f"BACKEND API · {client.mode_label}"
+            self.state.data_source = "Live"
 
         except Exception as exc:
             self.state.operation_status = "Pipeline Error"
-            self.state.error_message = f"Backend data unavailable — {exc}"
+            self.state.error_message = f"Tank data unavailable — {exc}"
             self._log("Observe", self.state.error_message, "error")
             raise
 
@@ -346,7 +348,7 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
         if self.state.scenario != "LIVE":
             self._log(
                 "Observe",
-                f"SIMULATION: {SCENARIOS[self.state.scenario]} (no backend writes)",
+                f"Scenario: {SCENARIOS[self.state.scenario]} — results are not saved",
                 "warn",
             )
         return self.state
