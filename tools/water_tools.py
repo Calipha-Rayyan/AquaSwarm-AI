@@ -176,9 +176,15 @@ class TankAssessment:
         return asdict(self)
 
     @property
+    def hours_to_empty(self) -> Optional[float]:
+        return None if self.days_of_cover is None else self.days_of_cover * 24.0
+
+    @property
     def cover_label(self) -> str:
         if self.days_of_cover is None:
             return "Self-sustaining"
+        if self.days_of_cover < 2:
+            return f"{self.days_of_cover * 24:.1f} hours"
         return f"{self.days_of_cover:.1f} days"
 
 
@@ -209,11 +215,17 @@ def assess_tank(
 # --------------------------------------------------------------------------
 # Supplier ranking (unchanged behaviour)
 # --------------------------------------------------------------------------
-def rank_suppliers(suppliers: List[Dict]) -> List[Dict]:
-    """Rank eligible suppliers: cost, then distance, then larger quantity."""
+def rank_suppliers(suppliers: List[Dict], priority: Optional[str] = None) -> List[Dict]:
+    """Rank eligible suppliers.
+
+    Normal conditions: lowest cost first. When the situation is urgent
+    (HIGH/CRITICAL) the fastest supplier (ETA) comes first, because delay is
+    then more costly than price. Distance and larger quantity break ties.
+    """
     if suppliers is None:
         return []
 
+    urgent = str(priority or "").upper() in {"HIGH", "CRITICAL"}
     normalized = []
     for supplier in suppliers:
         if not isinstance(supplier, dict):
@@ -232,14 +244,89 @@ def rank_suppliers(suppliers: List[Dict]) -> List[Dict]:
         item["estimated_cost"] = _number(
             supplier.get("estimated_cost", 0), "estimated_cost"
         )
+        eta = supplier.get("eta_minutes")
+        item["_eta"] = float(eta) if eta is not None else 1e9
         normalized.append(item)
 
-    return sorted(
-        normalized,
-        key=lambda s: (
-            s["estimated_cost"],
-            s["distance_km"],
-            -s["available_quantity"],
-            s["supplier_id"],
-        ),
-    )
+    def key(item):
+        if urgent:
+            return (item["_eta"], item["estimated_cost"], item["distance_km"],
+                    -item["available_quantity"], item["supplier_id"])
+        return (item["estimated_cost"], item["_eta"], item["distance_km"],
+                -item["available_quantity"], item["supplier_id"])
+
+    ranked = sorted(normalized, key=key)
+    for item in ranked:
+        item.pop("_eta", None)
+    return ranked
+
+
+# --------------------------------------------------------------------------
+# Multi-tank allocation under limited supply (PRD UC-04 / FR-06)
+# --------------------------------------------------------------------------
+_LEVEL_WEIGHT = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+
+def plan_allocation(needs: List[Dict], suppliers: List[Dict]) -> Dict:
+    """Share limited supplier volume between tanks that need water.
+
+    ``needs``: dicts with tank_code, site_name, shortage, priority,
+    criticality, population, days_of_cover.
+    ``suppliers``: dicts with supplier_id, available (bool),
+    available_quantity, estimated_cost, distance_km, eta_minutes.
+
+    Tanks are served in a transparent order: operational priority, then site
+    criticality, then least days of cover, then population served. A supplier's
+    volume is consumed as it is allocated. Nothing is allocated beyond
+    availability; what cannot be covered is reported as unmet demand.
+    """
+    def order(n):
+        cover = n.get("days_of_cover")
+        return (
+            -_LEVEL_WEIGHT.get(str(n.get("priority", "LOW")).upper(), 1),
+            -_LEVEL_WEIGHT.get(str(n.get("criticality", "MEDIUM")).upper(), 2),
+            float("inf") if cover is None else float(cover),
+            -int(n.get("population") or 0),
+            str(n.get("tank_code")),
+        )
+
+    queue = sorted((n for n in needs if float(n.get("shortage", 0)) > 0), key=order)
+    pool = {
+        str(s["supplier_id"]): dict(s)
+        for s in suppliers
+        if s.get("available") and float(s.get("available_quantity", 0)) > 0
+    }
+
+    rows, notes = [], []
+    for need in queue:
+        wanted = float(need["shortage"])
+        urgent = str(need.get("priority", "")).upper() in {"HIGH", "CRITICAL"}
+        ranked = rank_suppliers(list(pool.values()), "HIGH" if urgent else None)
+
+        full = next((s for s in ranked if float(s["available_quantity"]) >= wanted), None)
+        chosen = full or (max(ranked, key=lambda s: float(s["available_quantity"])) if ranked else None)
+
+        if chosen is None:
+            rows.append({**need, "supplier_id": None, "allocated": 0.0, "unmet": wanted})
+            notes.append(f"{need['tank_code']}: no supplier volume left.")
+            continue
+
+        given = min(wanted, float(chosen["available_quantity"]))
+        pool[str(chosen["supplier_id"])]["available_quantity"] = float(chosen["available_quantity"]) - given
+        rows.append({**need, "supplier_id": str(chosen["supplier_id"]),
+                     "allocated": given, "unmet": wanted - given})
+        if wanted - given > 0:
+            notes.append(
+                f"{need['tank_code']}: only {given:g} of {wanted:g} units could be covered "
+                f"(largest remaining supplier volume)."
+            )
+
+    total_need = sum(float(n["shortage"]) for n in queue)
+    total_given = sum(r["allocated"] for r in rows)
+    return {
+        "allocations": rows,
+        "total_need": total_need,
+        "total_allocated": total_given,
+        "unmet_total": max(total_need - total_given, 0.0),
+        "constraint_notes": notes,
+    }

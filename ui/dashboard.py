@@ -162,12 +162,59 @@ def pipeline_html(
     return f'<div class="river">{"".join(parts)}</div>'
 
 
+_STEP_MESSAGES = {
+    "Demand": "The demand agent is assessing water demand and reserve",
+    "Anomaly": "The anomaly agent is checking consumption patterns",
+    "Supply": "The supply agent is comparing available suppliers",
+    "Allocation": "The allocation agent is sizing the delivery",
+    "Approval": "The review agent is preparing the approval brief",
+}
+_STEP_ORDER = list(_STEP_MESSAGES)
+
+
+def _clock(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
+def progress_html(state: Any, elapsed: float = 0.0, finished: bool = False) -> str:
+    """Professional status bar: what is happening, which step, how long."""
+    stages = _get(state, "stages", {}) or {}
+    counted = [n for n in _STEP_ORDER if str(_get(stages.get(n), "status", "pending")) not in {"skipped", "blocked"}]
+    total = max(len(counted), 1)
+    done = sum(1 for n in counted if str(_get(stages.get(n), "status")) in {"done", "active"})
+    running = next((n for n in counted if str(_get(stages.get(n), "status")) == "running"), None)
+    fraction = min((done + (0.5 if running else 0)) / total, 1.0)
+
+    if finished:
+        message, sub, cls = "Analysis complete", "Review the proposed plan below.", " done"
+    elif running:
+        message = _STEP_MESSAGES.get(running, f"The {running.lower()} agent is working")
+        sub = f"Step {counted.index(running) + 1} of {total} · this usually takes about a minute, please keep this page open."
+        cls = ""
+    else:
+        message = "Reading live tank data"
+        sub = "Preparing the AI agents · this usually takes about a minute, please keep this page open."
+        cls = ""
+
+    phase = -(elapsed % 1.6)  # keeps the bar's shimmer continuous across refreshes
+    return _compact(
+        f"""
+        <div class="aq"><div class="progbar{cls}">
+          <div class="spin" style="animation-delay:{-(elapsed % 1.0):.2f}s"></div>
+          <div class="body"><div class="msg">{esc(message)}…</div><div class="sub">{esc(sub)}</div>
+            <div class="track"><div class="fill" style="width:{fraction * 100:.0f}%;animation-delay:{phase:.2f}s"></div></div></div>
+          <div class="time">{_clock(elapsed)}<small>elapsed</small></div>
+        </div></div>
+        """
+    )
+
+
 def live_html(state: Any, fresh: Optional[Iterable[str]] = None) -> str:
-    """Compact live view shown while the agents are working."""
+    """Pipeline and activity shown while the agents are working."""
     stages = _get(state, "stages", {}) or {}
     tank = esc(_get(state, "selected_tank_id", "—"))
     scenario = str(_get(state, "scenario", "LIVE"))
-    status = esc(_get(state, "operation_status", "Running"))
     activity = list(_get(state, "activity", []) or [])[-6:]
 
     rows = "".join(
@@ -184,8 +231,8 @@ def live_html(state: Any, fresh: Optional[Iterable[str]] = None) -> str:
         <div class="aq">
           <div class="card river-card">
             <div class="rhead">
-              <div><div class="rtitle">Agents are flowing through {tank}</div>
-              <div class="rop">{status}</div></div>
+              <div><div class="rtitle">Agents working on {tank}</div>
+              <div class="rop">{esc(_get(state, "operation_status", "Running"))}</div></div>
               <div class="aq-right">{sim}<span class="aq-chip">Live</span></div>
             </div>
             {pipeline_html(stages, fresh)}
@@ -263,6 +310,8 @@ def render_dashboard(
     delivery_completion_handler=None,
     run_error: str = "",
     backend_status: Optional[dict] = None,
+    can_approve: bool = True,
+    can_confirm_delivery: bool = True,
 ):
     """Render the AquaSwarm manager dashboard from the current flow state."""
     st.html(dashboard_css())
@@ -342,8 +391,17 @@ def render_dashboard(
     shortage = float(_get(demand, "shortage", assessment.get("shortage", 0)) or 0)
     priority = str(_get(demand, "priority", assessment.get("priority", "LOW"))).upper()
     cover_label = str(assessment.get("cover_label", "—"))
+    cover_value, _, cover_unit = cover_label.partition(" ")
     net_change = float(assessment.get("net_daily_change", inflow - demand_per_day))
     needs_water = shortage > 0
+    stats = _get(state, "consumption_stats", {}) or {}
+    baseline_rows = ""
+    if stats.get("baseline"):
+        deviation = float(stats.get("deviation_pct", 0))
+        baseline_rows = (
+            f'<div class="row"><span class="l">Recent baseline</span><span class="v">{_n(stats["baseline"])}<small>units/day</small></span></div>'
+            f'<div class="row"><span class="l">Latest vs baseline</span><span class="v {"warn" if abs(deviation) >= 40 else ""}">{deviation:+.0f}%</span></div>'
+        )
 
     error_message = str(_get(state, "error_message", "") or "")
     if error_message and status_text == "Pipeline Error":
@@ -358,7 +416,7 @@ def render_dashboard(
                 <div class="kpi-value">{_n(level)}<span class="kpi-unit">units</span></div>
                 <div class="kpi-meta">{fill:.0f}% of {_n(capacity)} capacity</div></div>
               <div class="card"><div class="kpi-label"><span>Days of cover</span><span>⏳</span></div>
-                <div class="kpi-value">{esc(cover_label.replace(" days", ""))}<span class="kpi-unit">{"days" if "days" in cover_label else ""}</span></div>
+                <div class="kpi-value">{esc(cover_value)}<span class="kpi-unit">{esc(cover_unit)}</span></div>
                 <div class="kpi-meta">Net change {net_change:+,.0f} units/day</div></div>
               <div class="card"><div class="kpi-label"><span>Daily demand</span><span>📈</span></div>
                 <div class="kpi-value">{_n(demand_per_day)}<span class="kpi-unit">units</span></div>
@@ -399,6 +457,7 @@ def render_dashboard(
                 <div class="row"><span class="l">Net daily change</span><span class="v {"warn" if net_change < 0 else "good"}">{net_change:+,.0f}<small>units</small></span></div>
                 <div class="row"><span class="l">Target reserve</span><span class="v">{_n(target)}<small>units</small></span></div>
                 <div class="row"><span class="l">Calculated shortage</span><span class="v {"warn" if needs_water else "good"}">{_n(shortage)}<small>units</small></span></div>
+                {baseline_rows}
                 <div class="row"><span class="l">Anomaly check</span><span class="v">{esc(_get(anomaly, "anomaly_type", "—") or "NONE").replace("_", " ").title() if anomaly else "—"}</span></div>
               </div></div></div>
             """
@@ -429,6 +488,16 @@ def render_dashboard(
             {pipeline_html(pipeline_stages)}{replan_html}</div></div>"""
         )
     )
+
+    unmet = float(_get(state, "unmet_quantity", 0) or 0)
+    if unmet > 0 and allocation is not None:
+        planned = _n(_get(allocation, "allocated_quantity"))
+        partial_text = (
+            "No single supplier can cover the whole shortage. This plan delivers "
+            f"{planned} units; {_n(unmet)} units remain uncovered and need a "
+            "follow-up delivery once this one is verified."
+        )
+        st.html(_compact(f'<div class="aq">{_banner("warn", "Partial coverage", partial_text)}</div>'))
 
     # ---- Approval gate
     awaiting = (
@@ -461,6 +530,8 @@ def render_dashboard(
                 """
             )
         )
+        if not can_approve:
+            st.info("Only a manager or administrator can approve or reject this allocation.")
         reason = st.text_area(
             "Manager decision note",
             key=f"manager_approval_reason_{tank_id}",
@@ -470,12 +541,12 @@ def render_dashboard(
         approve_col, reject_col = st.columns(2)
         with approve_col:
             if st.button("✓  APPROVE ALLOCATION", key=f"approve_allocation_{tank_id}",
-                         use_container_width=True, type="primary"):
+                         use_container_width=True, type="primary", disabled=not can_approve):
                 if approval_handler(True, reason.strip()) is not False:
                     st.rerun()
         with reject_col:
             if st.button("✕  REJECT ALLOCATION", key=f"reject_allocation_{tank_id}",
-                         use_container_width=True):
+                         use_container_width=True, disabled=not can_approve):
                 if approval_handler(False, reason.strip()) is not False:
                     st.rerun()
 
@@ -499,9 +570,16 @@ def render_dashboard(
             value=float(_get(allocation, "allocated_quantity", 0)), step=1.0,
             key=f"actual_delivery_quantity_{tank_id}",
         )
+        evidence = st.text_input(
+            "Proof of delivery",
+            key=f"delivery_evidence_{tank_id}",
+            placeholder="Meter reading, delivery slip number or note",
+        )
+        if not can_confirm_delivery:
+            st.info("Your role cannot confirm deliveries.")
         if st.button("✓  CONFIRM DELIVERY RECEIVED", key=f"confirm_delivery_{tank_id}",
-                     use_container_width=True, type="primary"):
-            if delivery_completion_handler(actual) is not False:
+                     use_container_width=True, type="primary", disabled=not can_confirm_delivery):
+            if delivery_completion_handler(actual, evidence.strip()) is not False:
                 st.rerun()
 
     # ---- Supplier ranking
@@ -524,6 +602,11 @@ def render_dashboard(
             else "Waiting for delivery"
         )
         approved_qty = _get(allocation, "allocated_quantity", 0)
+        proof = str(_get(state, "delivery_evidence", "") or "")
+        evidence_row = (
+            f'<div class="row"><span class="l">Proof of delivery</span><span class="v">{esc(proof)}</span></div>'
+            if proof else ""
+        )
         st.html(
             _compact(
                 f"""
@@ -533,7 +616,8 @@ def render_dashboard(
                   <div class="tag">{esc(_get(delivery, "supplier_id"))}</div></div>
                   <div class="row"><span class="l">Quantity</span><span class="v">{_n(_get(delivery, "quantity"))}<small>units</small></span></div>
                   <div class="row"><span class="l">Status</span><span class="v">{esc(delivery_status.title())}</span></div>
-                  <div class="row"><span class="l">Estimated arrival</span><span class="v">{_format_eta(_get(delivery, "estimated_arrival"))}</span></div></div>
+                  <div class="row"><span class="l">Estimated arrival</span><span class="v">{_format_eta(_get(delivery, "estimated_arrival"))}</span></div>
+                  {evidence_row}</div>
                 <div class="card"><div class="chead"><div><div class="ctitle">Verification</div><div class="csub">Delivery confirmation</div></div></div>
                   <div class="row"><span class="l">Result</span><span class="v {"good" if verified is True else "warn" if verified is False else ""}">{v_text}</span></div>
                   <div class="row"><span class="l">Approved quantity</span><span class="v">{_n(approved_qty)}<small>units</small></span></div>

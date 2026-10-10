@@ -1,5 +1,6 @@
 from pathlib import Path
 import csv
+import os
 import shutil
 import sqlite3
 from datetime import datetime, timezone
@@ -200,7 +201,9 @@ def create_schema() -> None:
         name TEXT NOT NULL,
         location TEXT NOT NULL,
         manager_name TEXT,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        population INTEGER NOT NULL DEFAULT 0,
+        criticality TEXT NOT NULL DEFAULT 'MEDIUM'
     );
 
     CREATE TABLE IF NOT EXISTS tanks (
@@ -343,6 +346,34 @@ def table_columns(table_name: str) -> set[str]:
         return {row["name"] for row in rows}
 
 
+def seed_demo_enabled() -> bool:
+    """Sample CSV data is only loaded when explicitly requested.
+
+    Real deployments start empty and are filled through the app or the
+    telemetry API; set AQUASWARM_SEED_DEMO_DATA=true only for demos/tests.
+    """
+    return os.getenv("AQUASWARM_SEED_DEMO_DATA", "false").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def ensure_columns() -> None:
+    """Add columns introduced after a database was first created."""
+    wanted = {
+        "sites": {
+            "population": "INTEGER NOT NULL DEFAULT 0",
+            "criticality": "TEXT NOT NULL DEFAULT 'MEDIUM'",
+        },
+    }
+    for table, columns in wanted.items():
+        existing = table_columns(table)
+        with get_connection() as conn:
+            for name, ddl in columns.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            conn.commit()
+
+
 def schema_is_compatible() -> bool:
     for table_name, required in REQUIRED_SCHEMA.items():
         columns = table_columns(table_name)
@@ -380,7 +411,8 @@ def backup_incompatible_database() -> Path:
             row[0]
             for row in conn.execute(
                 "SELECT name FROM sqlite_master "
-                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+                "AND name NOT IN ('users', 'password_resets')"
             )
         ]
         for name in names:
@@ -610,12 +642,6 @@ def import_csv_data() -> None:
 # ============================================================
 
 def validate_database() -> None:
-    for table in ("sites", "tanks", "consumption", "suppliers"):
-        row = query_one(f"SELECT COUNT(*) AS count FROM {table}")
-
-        if int(row["count"]) == 0:
-            raise RuntimeError(f"{table}: table is empty after seeding.")
-
     orphan_tanks = query_one(
         """
         SELECT COUNT(*) AS count
@@ -667,14 +693,18 @@ def initialize_database() -> None:
 
     if DATABASE_PATH.exists():
         try:
-            if not schema_is_compatible():
+            has_core_tables = any(table_columns(t) for t in REQUIRED_SCHEMA)
+            if has_core_tables and not schema_is_compatible():
                 backup_incompatible_database()
         except sqlite3.DatabaseError:
             backup_incompatible_database()
 
     create_schema()
-    seed_if_needed()
-    refresh_supplier_logistics()
+    ensure_columns()
+
+    if seed_demo_enabled():
+        seed_if_needed()
+        refresh_supplier_logistics()
     validate_database()
 
 

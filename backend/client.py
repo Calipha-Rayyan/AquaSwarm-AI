@@ -233,6 +233,17 @@ class BackendClient:
                 )
 
         if method == "POST":
+            from backend import operations as ops
+
+            if endpoint == "/sites":
+                return ops.create_site(**payload)
+            if endpoint == "/tanks":
+                return ops.create_tank(**payload)
+            if endpoint == "/readings":
+                return ops.record_reading(**payload)
+            if endpoint == "/suppliers":
+                return ops.create_supplier(**payload)
+
             if endpoint == "/alerts":
                 model = api.AlertIn(**payload)
                 return api.create_alert(model)
@@ -254,6 +265,18 @@ class BackendClient:
                 return api.create_agent_run(model)
 
         if method == "PATCH":
+            site_match = re.fullmatch(r"/sites/(\d+)", endpoint)
+            if site_match:
+                from backend import operations as ops
+
+                return ops.update_site(int(site_match.group(1)), **payload)
+
+            supplier_match = re.fullmatch(r"/suppliers/(\d+)", endpoint)
+            if supplier_match:
+                from backend import operations as ops
+
+                return ops.update_supplier(int(supplier_match.group(1)), **payload)
+
             match = re.fullmatch(
                 r"/delivery-requests/(\d+)/status",
                 endpoint,
@@ -467,3 +490,25 @@ class BackendClient:
             info["label"] = self.mode_label
             info["error"] = f"{type(exc).__name__}: {exc}"
         return info
+
+    # ------------------------------------------------------------------
+    # Real-data writes
+    # ------------------------------------------------------------------
+
+    def create_site(self, payload):
+        return self.post("/sites", payload)
+
+    def create_tank(self, payload):
+        return self.post("/tanks", payload)
+
+    def record_reading(self, payload):
+        return self.post("/readings", payload)
+
+    def create_supplier(self, payload):
+        return self.post("/suppliers", payload)
+
+    def update_supplier(self, supplier_id: int, payload):
+        return self.patch(f"/suppliers/{supplier_id}", payload)
+
+    def update_site(self, site_id: int, payload):
+        return self.patch(f"/sites/{site_id}", payload)

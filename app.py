@@ -1,14 +1,24 @@
 from __future__ import annotations
 
-import logging
 import threading
 import time
 
 import streamlit as st
 
-from ui.components import authenticate, build_network_svg, get_tank_options
-from ui.components.auth import using_default_credentials
-from ui.dashboard import live_html, render_dashboard
+from backend import users
+from ui.auth_pages import render_auth_gate
+from ui.components import build_client, get_tank_options
+from ui.dashboard import live_html, progress_html, render_dashboard
+from ui.data_admin import render_data, render_team
+from ui.pages import (
+    empty_state,
+    header,
+    render_alerts_activity,
+    render_deliveries,
+    render_overview,
+    render_roadmap,
+    render_suppliers,
+)
 from ui.theme import base_css, dashboard_css
 from workflows.aquaswarm_flow import SCENARIOS, AquaSwarmFlow, AquaSwarmState
 
@@ -19,72 +29,79 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-log = logging.getLogger("aquaswarm")
-if using_default_credentials():
-    log.warning("Default login credentials are active; set AQUASWARM_DEMO_PASSWORD.")
+APPROVERS = {"manager", "admin"}
+DELIVERY_CONFIRMERS = {"operator", "manager", "admin"}
+DATA_MANAGERS = {"manager", "admin"}
+BLOCKING_STATUSES = {"Awaiting Manager Approval", "Delivery Dispatched", "Delivery In Progress"}
 
-MAX_LOGIN_FAILURES = 5
-LOCKOUT_SECONDS = 60
-BLOCKING_STATUSES = {
-    "Awaiting Manager Approval",
-    "Delivery Dispatched",
-    "Delivery In Progress",
+FLASH = {
+    "Awaiting Manager Approval": ("✅", "Analysis complete — the proposed allocation is waiting for approval."),
+    "No Replenishment Required": ("✅", "Analysis complete — no replenishment is needed."),
+    "No Eligible Supplier": ("⚠️", "Analysis complete — no supplier can cover this shortage."),
+    "Pipeline Error": ("❌", "The analysis could not be completed."),
 }
 
 
 # ---------------------------------------------------------------------------
-# Manager actions
+# Actions (permissions are enforced here as well as in the UI)
 # ---------------------------------------------------------------------------
 
+def _actor() -> str:
+    user = st.session_state.user
+    return f"{user['full_name']} ({user['email']})"
+
+
 def resume_flow_from_state(workflow_state: AquaSwarmState) -> AquaSwarmFlow:
-    """Restore an interrupted operation into a new flow instance."""
-    restored_state = AquaSwarmState.model_validate(workflow_state.model_dump())
-    return AquaSwarmFlow(initial_state=restored_state)
+    restored = AquaSwarmState.model_validate(workflow_state.model_dump())
+    return AquaSwarmFlow(initial_state=restored)
 
 
 def handle_manager_decision(approved: bool, reason: str = "") -> bool:
-    """Record the human decision and continue the approved/rejected branch."""
-    workflow_state = st.session_state.get("workflow_state")
-    if workflow_state is None:
+    if st.session_state.user["role"] not in APPROVERS:
+        st.error("Your role cannot approve or reject deliveries.")
+        return False
+    state = st.session_state.get("workflow_state")
+    if state is None:
         st.error("No active water operation found.")
         return False
-
-    decided_by = st.session_state.get("current_user", "Manager")
     try:
         with st.spinner("Recording the decision and running the next agents…"):
-            flow = resume_flow_from_state(workflow_state)
-            flow.manager_decision(approved=approved, decided_by=decided_by, reason=reason.strip())
+            flow = resume_flow_from_state(state)
+            flow.manager_decision(approved=approved, decided_by=_actor(), reason=reason.strip())
         st.session_state.workflow_state = flow.state
+        st.session_state.flash = ("✅", "Decision recorded." if approved else "Allocation rejected; a recovery plan was prepared.")
         return True
     except Exception as exc:
-        st.error(f"Unable to process manager decision: {exc}")
+        st.error(f"Unable to process the decision: {exc}")
         return False
 
 
-def handle_delivery_completion(actual_quantity: float) -> bool:
-    """Record the physical received quantity and trigger verification."""
-    workflow_state = st.session_state.get("workflow_state")
-    if workflow_state is None:
+def handle_delivery_completion(actual_quantity: float, evidence: str = "") -> bool:
+    if st.session_state.user["role"] not in DELIVERY_CONFIRMERS:
+        st.error("Your role cannot confirm deliveries.")
+        return False
+    state = st.session_state.get("workflow_state")
+    if state is None:
         st.error("No active water operation found.")
         return False
-
     try:
         with st.spinner("Verifying the delivery…"):
-            flow = resume_flow_from_state(workflow_state)
-            flow.complete_delivery(float(actual_quantity))
+            flow = resume_flow_from_state(state)
+            flow.complete_delivery(float(actual_quantity), evidence)
         st.session_state.workflow_state = flow.state
+        st.session_state.flash = ("✅", "Delivery recorded and verified.")
         return True
     except Exception as exc:
-        st.error(f"Unable to complete delivery: {exc}")
+        st.error(f"Unable to complete the delivery: {exc}")
         return False
 
 
 # ---------------------------------------------------------------------------
-# Running the pipeline with a live, animated view
+# Running the pipeline with a live message bar
 # ---------------------------------------------------------------------------
 
 def run_operation(tank_id: str, scenario: str) -> None:
-    """Run the agent pipeline in a worker thread and animate its progress.
+    """Run the agents in a worker thread and show professional live progress.
 
     The flow updates its own stage records; this loop only reads them, so no
     Streamlit calls happen off the main thread.
@@ -92,49 +109,50 @@ def run_operation(tank_id: str, scenario: str) -> None:
     flow = AquaSwarmFlow()
     flow.state.selected_tank_id = tank_id
     flow.state.scenario = scenario
-
     outcome: dict = {}
 
     def target() -> None:
         try:
             flow.kickoff()
-        except Exception as exc:  # reported below, never swallowed
+        except Exception as exc:
             outcome["error"] = exc
 
+    started = time.monotonic()
     worker = threading.Thread(target=target, daemon=True)
     worker.start()
 
     st.html(dashboard_css())
+    bar = st.empty()
     view = st.empty()
+    bar.html(progress_html(flow.state, 0.0))
 
     previous_statuses: dict = {}
     previous_signature = None
+    last_bar = 0.0
 
     while worker.is_alive():
+        elapsed = time.monotonic() - started
         try:
-            statuses = {name: rec.status for name, rec in list(flow.state.stages.items())}
-            signature = (
-                tuple(sorted(statuses.items())),
-                len(flow.state.activity),
-                flow.state.operation_status,
-            )
-        except RuntimeError:  # a stage was added while reading; try again
+            statuses = {n: r.status for n, r in list(flow.state.stages.items())}
+            signature = (tuple(sorted(statuses.items())), len(flow.state.activity), flow.state.operation_status)
+        except RuntimeError:
             time.sleep(0.1)
             continue
 
-        if signature != previous_signature:
-            fresh = {
-                name for name, status in statuses.items()
-                if status == "done" and previous_statuses.get(name) != "done"
-            }
+        changed = signature != previous_signature
+        if changed:
+            fresh = {n for n, s in statuses.items() if s == "done" and previous_statuses.get(n) != "done"}
             view.html(live_html(flow.state, fresh))
             previous_statuses, previous_signature = statuses, signature
+        if changed or elapsed - last_bar >= 1.0:
+            bar.html(progress_html(flow.state, elapsed))
+            last_bar = elapsed
         time.sleep(0.25)
 
     worker.join()
 
-    error = outcome.get("error")
     state = flow.state
+    error = outcome.get("error")
     message = ""
     if error is not None:
         message = state.error_message or f"{type(error).__name__}: {error}"
@@ -143,133 +161,15 @@ def run_operation(tank_id: str, scenario: str) -> None:
 
     st.session_state.workflow_state = state
     st.session_state.run_error = message
+    st.session_state.flash = FLASH.get(state.operation_status)
     st.rerun()
 
 
 # ---------------------------------------------------------------------------
-# Login
+# Pages
 # ---------------------------------------------------------------------------
 
-def _locked_out() -> int:
-    until = st.session_state.get("login_locked_until", 0.0)
-    return max(0, int(until - time.time()))
-
-
-def render_login() -> None:
-    st.markdown(base_css(), unsafe_allow_html=True)
-
-    st.markdown(
-        """
-        <div class="topbar">
-          <div class="brand"><span class="drop"></span>AQUASWARM AI</div>
-          <div class="status"><span class="pulse"></span>SYSTEM ONLINE</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    left, right = st.columns([1.3, 0.7], gap="large")
-
-    with left:
-        st.markdown(
-            """
-            <div class="hero-kicker">AI WATER OPERATIONS</div>
-            <h1 class="hero-title">Autonomous intelligence<br>for <span>water.</span></h1>
-            <div class="hero-sub">Eight coordinated agents. One human in command.</div>
-            <div class="login-label">LIVE AGENT NETWORK</div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.html(build_network_svg())
-        st.markdown(
-            """
-            <div class="stats">
-              <div class="stat"><div class="sv">08</div><div class="sl">OPERATIONAL AI AGENTS</div></div>
-              <div class="stat"><div class="sv">24/7</div><div class="sl">MONITORING MODEL</div></div>
-              <div class="stat"><div class="sv">HUMAN</div><div class="sl">FINAL CONTROL</div></div>
-            </div>
-            <div class="ticker"><i></i>AGENT SWARM ACTIVE · REPLANNING LOOP READY</div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with right:
-        with st.container(key="login_card"):
-            st.markdown(
-                """
-                <div class="login-title">Secure Session</div>
-                <div class="login-copy">Access the AquaSwarm operations control center.</div>
-                <div class="login-field-label">EMAIL</div>
-                """,
-                unsafe_allow_html=True,
-            )
-            email = st.text_input(
-                "Email", placeholder="you@organization.com",
-                key="login_email", label_visibility="collapsed",
-            )
-            st.markdown(
-                '<div class="login-field-label login-password-label">PASSWORD</div>',
-                unsafe_allow_html=True,
-            )
-            password = st.text_input(
-                "Password", type="password", placeholder="Enter your password",
-                key="login_password", label_visibility="collapsed",
-            )
-
-            wait = _locked_out()
-            submitted = st.button(
-                "Sign In  →", key="login_submit",
-                use_container_width=True, type="primary", disabled=wait > 0,
-            )
-
-            if wait > 0:
-                st.error(f"Too many failed attempts. Try again in {wait}s.")
-            elif submitted:
-                if not email.strip() or not password:
-                    st.error("Please enter your email and password.")
-                elif authenticate(email, password):
-                    st.session_state.authenticated = True
-                    st.session_state.current_user = email.strip().lower()
-                    st.session_state.login_failures = 0
-                    st.session_state.pop("login_password", None)
-                    st.rerun()
-                else:
-                    failures = st.session_state.get("login_failures", 0) + 1
-                    st.session_state.login_failures = failures
-                    if failures >= MAX_LOGIN_FAILURES:
-                        st.session_state.login_locked_until = time.time() + LOCKOUT_SECONDS
-                        st.session_state.login_failures = 0
-                        st.error(f"Too many failed attempts. Locked for {LOCKOUT_SECONDS}s.")
-                    else:
-                        st.error("Invalid email or password.")
-
-            st.markdown('<p class="secure">🔒 Authorized personnel only</p>', unsafe_allow_html=True)
-
-
-# ---------------------------------------------------------------------------
-# Main app
-# ---------------------------------------------------------------------------
-
-def render_app() -> None:
-    st.session_state.setdefault("authenticated", False)
-    st.session_state.setdefault("current_user", "")
-    st.session_state.setdefault("workflow_state", None)
-    st.session_state.setdefault("run_error", "")
-
-    if not st.session_state.authenticated:
-        render_login()
-        return
-
-    st.markdown(base_css(), unsafe_allow_html=True)
-
-    st.sidebar.markdown(
-        """<div style="padding:8px 0 10px 0;">
-          <div style="color:#f6feff;font-weight:800;font-size:19px;letter-spacing:-.2px;">💧 AquaSwarm Control</div>
-          <div style="color:#8fb7c4;font-size:11px;margin-top:3px;">Manager operations workspace</div>
-        </div>""",
-        unsafe_allow_html=True,
-    )
-
+def page_operation(client, user: dict) -> None:
     try:
         tank_options = get_tank_options()
     except Exception as exc:
@@ -278,69 +178,139 @@ def render_app() -> None:
             st.rerun()
         return
 
-    selected_default = st.session_state.get("selected_tank_id", tank_options[0])
-    if selected_default not in tank_options:
-        selected_default = tank_options[0]
+    if not tank_options:
+        header("Operation", "Run the AI agents on a tank")
+        empty_state("Nothing to analyse yet",
+                    "Add a site and a tank under Data, record a reading, then return here to start an operation.")
+        return
 
-    selected_tank = st.sidebar.selectbox(
-        "Select Tank", tank_options,
-        index=tank_options.index(selected_default), key="selected_tank_id",
-    )
+    default = st.session_state.get("selected_tank_id", tank_options[0])
+    if default not in tank_options:
+        default = tank_options[0]
+    tank = st.sidebar.selectbox("Select tank", tank_options, index=tank_options.index(default), key="selected_tank_id")
+    scenario = st.sidebar.selectbox("Operating scenario", list(SCENARIOS), format_func=lambda k: SCENARIOS[k], key="scenario")
 
-    scenario_keys = list(SCENARIOS)
-    scenario = st.sidebar.selectbox(
-        "Operating scenario",
-        scenario_keys,
-        format_func=lambda key: SCENARIOS[key],
-        key="scenario",
-        help=(
-            "Live conditions use the tank's current reading. The other "
-            "scenarios stress-test the response and never change real tank levels."
-        ),
-    )
-
-    workflow_state = st.session_state.get("workflow_state")
-    current_status = str(getattr(workflow_state, "operation_status", "Ready"))
-    if workflow_state is not None:
+    state = st.session_state.get("workflow_state")
+    status = str(getattr(state, "operation_status", "Ready"))
+    if state is not None:
         st.sidebar.markdown(
-            f'<div style="margin:10px 0 14px;padding:10px 12px;border:1px solid rgba(120,225,240,.2);'
-            f'border-radius:12px;background:rgba(3,24,38,.7);">'
-            f'<div style="color:#8fb7c4;font-size:9px;letter-spacing:1.4px;text-transform:uppercase;">Operation</div>'
-            f'<div style="color:#effcff;font-size:12.5px;font-weight:700;margin-top:4px;">{current_status}</div></div>',
+            f'<div class="userchip" style="margin-top:12px"><div><div class="rl">Operation</div>'
+            f'<div class="nm">{status}</div></div></div>',
             unsafe_allow_html=True,
         )
-    st.sidebar.markdown("---")
 
-    run_disabled = current_status in BLOCKING_STATUSES
-
-    if st.sidebar.button(
-        "▶ Run Water Operation",
-        use_container_width=True, type="primary", disabled=run_disabled,
-    ):
+    blocked = status in BLOCKING_STATUSES
+    if st.sidebar.button("▶ Run water operation", use_container_width=True, type="primary", disabled=blocked):
         st.session_state.run_error = ""
-        run_operation(selected_tank, scenario)  # ends with st.rerun()
-
-    if run_disabled:
+        run_operation(tank, scenario)
+    if blocked:
         st.sidebar.caption("Finish or reset the current operation to start a new one.")
-
-    if st.sidebar.button("Reset Current Operation", use_container_width=True):
-        st.session_state.workflow_state = None
-        st.session_state.run_error = ""
-        st.rerun()
-
-    if st.sidebar.button("Logout", use_container_width=True):
-        st.session_state.authenticated = False
-        st.session_state.current_user = ""
+    if st.sidebar.button("Reset current operation", use_container_width=True):
         st.session_state.workflow_state = None
         st.session_state.run_error = ""
         st.rerun()
 
     render_dashboard(
-        st.session_state.workflow_state,
+        st.session_state.get("workflow_state"),
         approval_handler=handle_manager_decision,
         delivery_completion_handler=handle_delivery_completion,
         run_error=st.session_state.get("run_error", ""),
+        can_approve=user["role"] in APPROVERS,
+        can_confirm_delivery=user["role"] in DELIVERY_CONFIRMERS,
     )
+
+
+def sidebar_account(user: dict) -> None:
+    with st.sidebar.expander("Account"):
+        with st.form("change_password", clear_on_submit=True):
+            current = st.text_input("Current password", type="password")
+            new = st.text_input("New password", type="password")
+            confirm = st.text_input("Confirm new password", type="password")
+            go = st.form_submit_button("Change password", use_container_width=True)
+        if go:
+            if new != confirm:
+                st.error("The new passwords do not match.")
+            else:
+                try:
+                    users.change_password(user["id"], current, new)
+                    st.success("Password changed.")
+                except ValueError as exc:
+                    st.error(str(exc))
+    if st.sidebar.button("Sign out", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# App shell
+# ---------------------------------------------------------------------------
+
+def render_app() -> None:
+    st.session_state.setdefault("workflow_state", None)
+    st.session_state.setdefault("run_error", "")
+
+    user = st.session_state.get("user")
+    if not user:
+        render_auth_gate()
+        return
+
+    # Re-check the account on every run so a disabled user is signed out.
+    try:
+        current = users.get_user(user["id"])
+    except Exception:
+        current = None
+    if not current or current["status"] != "ACTIVE":
+        st.session_state.clear()
+        st.rerun()
+    st.session_state.user = user = current
+
+    st.markdown(base_css(), unsafe_allow_html=True)
+
+    flash = st.session_state.pop("flash", None)
+    if flash:
+        st.toast(flash[1], icon=flash[0])
+
+    initials = "".join(part[0] for part in user["full_name"].split()[:2]).upper() or "?"
+    st.sidebar.markdown(
+        f"""<div style="padding:8px 0 12px 0;"><div style="color:#f6feff;font-weight:800;font-size:19px;letter-spacing:-.2px;">💧 AquaSwarm</div>
+        <div style="color:#8fb7c4;font-size:11px;margin-top:3px;">Water operations control center</div></div>
+        <div class="userchip"><div class="av">{initials}</div><div><div class="nm">{user['full_name']}</div>
+        <div class="rl">{user['role']}</div></div></div>""",
+        unsafe_allow_html=True,
+    )
+
+    pages = ["Overview", "Operation", "Deliveries", "Alerts & activity", "Suppliers", "Data"]
+    if user["role"] == "admin":
+        pages.append("Team access")
+    pages.append("Roadmap")
+    page = st.sidebar.radio("Navigate", pages, key="nav", label_visibility="collapsed")
+    st.sidebar.markdown("---")
+
+    client = build_client()
+    try:
+        if page == "Overview":
+            render_overview(client)
+        elif page == "Operation":
+            page_operation(client, user)
+        elif page == "Deliveries":
+            render_deliveries(client)
+        elif page == "Alerts & activity":
+            render_alerts_activity(client)
+        elif page == "Suppliers":
+            render_suppliers(client, can_edit=user["role"] in DATA_MANAGERS)
+        elif page == "Data":
+            render_data(client, user["role"])
+        elif page == "Team access" and user["role"] == "admin":
+            render_team(user)
+        else:
+            render_roadmap()
+    except Exception as exc:
+        st.error(f"This page could not be loaded: {exc}")
+        if st.button("Try again"):
+            st.rerun()
+
+    st.sidebar.markdown("---")
+    sidebar_account(user)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ from agents.verification.task import (
     create_verification_task,
 )
 from backend.client import BackendClient, BackendUnavailable
+from backend.notify import notify_managers
 from config.settings import (
     AQUASWARM_BACKEND_ENABLED,
     AQUASWARM_BACKEND_MODE,
@@ -62,6 +63,10 @@ SCENARIOS: Dict[str, str] = {
     "LOW_LEVEL": "Low reserve",
     "CRITICAL_LOW": "Critical shortage",
 }
+
+# Latest consumption this far above the recent baseline counts as a spike.
+SPIKE_THRESHOLD_PCT = 40.0
+HISTORY_DAYS = 7
 
 _ALLOWED_REPLAN_ACTIONS = {
     "REPLAN_ALLOCATION",
@@ -118,6 +123,9 @@ class AquaSwarmState(BaseModel):
     site_id: Optional[int] = None
     water_data: Optional[WaterData] = None
     assessment: Optional[Dict[str, Any]] = None
+    consumption_stats: Dict[str, Any] = Field(default_factory=dict)
+    unmet_quantity: float = 0.0
+    delivery_evidence: str = ""
 
     demand_result: Optional[DemandResult] = None
     anomaly_result: Optional[AnomalyResult] = None
@@ -190,6 +198,28 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
     def _warn(self, message: str) -> None:
         self.state.sync_warnings.append(message[:300])
         self._log("System", message, "warn")
+
+    def _raise_alert(self, alert_type: str, severity: str, message: str) -> None:
+        """Persist an alert and e-mail managers (best effort, live data only)."""
+        if not self._persist() or self.state.site_id is None:
+            return
+        try:
+            self._backend().create_alert(
+                {
+                    "site_id": self.state.site_id,
+                    "tank_code": self.state.selected_tank_id,
+                    "alert_type": alert_type,
+                    "severity": severity,
+                    "message": message[:480],
+                }
+            )
+        except Exception as exc:
+            self._warn(f"Alert could not be recorded: {exc}")
+            return
+        try:
+            notify_managers(f"AquaSwarm {severity} alert: {alert_type}", message)
+        except Exception:
+            pass
 
     def _record_run(self, agent: str, status: str, summary_in: str, summary_out: str) -> None:
         """Best-effort audit trail in the backend (/agent-runs)."""
@@ -318,13 +348,22 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
                     f"Tank {selected} was not found in the backend (known: {known})."
                 )
 
-            consumption = client.get_consumption(tank_code=selected, limit=1)
-            if consumption:
-                daily_demand = float(consumption[0]["amount"])
+            history = client.get_consumption(tank_code=selected, limit=HISTORY_DAYS)
+            amounts = [float(row["amount"]) for row in history]
+            stats: Dict[str, Any] = {"readings": len(amounts)}
+            if amounts:
+                # Planning basis: recent average, so one odd reading does not
+                # drive the whole plan. The latest reading is checked against
+                # the baseline of the earlier ones for spikes.
+                daily_demand = sum(amounts) / len(amounts)
+                latest = amounts[0]
+                earlier = amounts[1:]
+                baseline = sum(earlier) / len(earlier) if len(earlier) >= 3 else None
+                stats.update(latest=latest, baseline=baseline)
             else:
                 daily_demand = 0.0
                 self._warn(
-                    f"No consumption record exists for {selected}; demand assumed 0."
+                    f"No consumption readings exist for {selected}; demand assumed 0."
                 )
 
             reading = WaterData(
@@ -345,6 +384,15 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
             raise
 
         self.state.water_data = apply_scenario(reading, self.state.scenario)
+        if self.state.scenario == "DEMAND_SURGE" and stats.get("latest") is not None:
+            stats["baseline"] = stats.get("baseline") or reading.daily_demand
+            stats["latest"] = float(stats["latest"]) * 2.5
+        if stats.get("baseline"):
+            stats["deviation_pct"] = (
+                (float(stats["latest"]) - float(stats["baseline"]))
+                / float(stats["baseline"]) * 100.0
+            )
+        self.state.consumption_stats = stats
         if self.state.scenario != "LIVE":
             self._log(
                 "Observe",
@@ -382,6 +430,7 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
                 "target_level": a.target_level,
                 "shortage": a.shortage,
                 "priority": a.priority,
+                "hours_to_empty": a.hours_to_empty,
             }
 
             reasoning = (getattr(llm_result, "reasoning", "") or "").strip() or (
@@ -448,6 +497,21 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
 
             if severity not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
                 severity = "MEDIUM" if detected else "LOW"
+
+            # Deterministic baseline check (consumption vs. recent history).
+            stats = self.state.consumption_stats or {}
+            deviation = stats.get("deviation_pct")
+            if deviation is not None and deviation >= SPIKE_THRESHOLD_PCT:
+                spike_level = "HIGH" if deviation >= 75 else "MEDIUM"
+                evidence = (
+                    f"Latest consumption is {deviation:.0f}% above the recent baseline "
+                    f"of {float(stats['baseline']):g} units/day."
+                )
+                if not detected:
+                    detected, a_type, severity = True, "CONSUMPTION_SPIKE", spike_level
+                    reasoning = evidence  # replaces a contradicting "nothing unusual"
+                else:
+                    reasoning = f"{reasoning or ''} {evidence}".strip()
             if not detected:
                 a_type, severity = "NONE", "LOW"
 
@@ -463,24 +527,17 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
                 if detected else "No anomaly detected"
             )
 
-        if (
-            self._persist()
-            and detected
-            and severity in {"HIGH", "CRITICAL"}
-            and self.state.site_id is not None
-        ):
-            try:
-                self._backend().create_alert(
-                    {
-                        "site_id": self.state.site_id,
-                        "tank_code": water.tank_id,
-                        "alert_type": a_type,
-                        "severity": severity,
-                        "message": f"{water.tank_id}: {reasoning}"[:480],
-                    }
-                )
-            except Exception as exc:
-                self._warn(f"Alert could not be recorded: {exc}")
+        if detected and severity in {"HIGH", "CRITICAL"}:
+            self._raise_alert(a_type, severity, f"{water.tank_id}: {reasoning}")
+        if demand.priority in {"HIGH", "CRITICAL"}:
+            info = self.state.assessment or {}
+            self._raise_alert(
+                "SHORTAGE_RISK",
+                demand.priority,
+                f"{water.tank_id} is {float(info.get('fill_percentage', 0)):.0f}% full with "
+                f"{info.get('cover_label', 'limited cover')} of cover; "
+                f"shortage {demand.shortage:g} units.",
+            )
 
         self._record_run("Anomaly Agent", "COMPLETED", water.tank_id, stage.detail)
 
@@ -531,14 +588,36 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
                 s for s in normalised
                 if s["available"] and s["available_quantity"] >= required
             ]
-            ranked = rank_suppliers(eligible)
+            ranked = rank_suppliers(eligible, demand.priority)
             recommended = ranked[0]["supplier_id"] if ranked else None
 
+            partial_volume = 0.0
+            if not ranked:
+                # PRD "constrained plan": nobody can cover the whole shortage,
+                # so use the largest available supplier and report the rest.
+                usable = [s for s in normalised if s["available"] and s["available_quantity"] > 0]
+                if usable:
+                    by_rank = rank_suppliers(usable, demand.priority)
+                    best = max(by_rank, key=lambda s: s["available_quantity"])
+                    ranked = [best]
+                    recommended = best["supplier_id"]
+                    partial_volume = float(best["available_quantity"])
+
             default_reason = (
-                f"{recommended} is the lowest-cost eligible supplier for "
-                f"{required:g} units."
-                if recommended
-                else f"No available supplier can deliver {required:g} units."
+                (
+                    f"{recommended} offers the fastest delivery among eligible suppliers "
+                    f"for this {demand.priority.lower()}-priority need of {required:g} units."
+                    if demand.priority in {"HIGH", "CRITICAL"}
+                    else f"{recommended} is the lowest-cost eligible supplier for {required:g} units."
+                )
+                if recommended and not partial_volume
+                else (
+                    f"No single supplier can cover {required:g} units. {recommended} has the largest "
+                    f"volume ({partial_volume:g}); the remaining {required - partial_volume:g} units "
+                    f"need a follow-up delivery."
+                    if recommended
+                    else f"No available supplier can deliver {required:g} units."
+                )
             )
             reasoning = (getattr(llm_result, "reasoning", "") or "").strip()
             # The model must not contradict the deterministic ranking.
@@ -582,7 +661,11 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
                     status="blocked",
                 )
             else:
-                stage.detail = f"{recommended} recommended · {len(ranked)} eligible"
+                stage.detail = (
+                    f"{recommended} · partial {partial_volume:g} of {required:g}"
+                    if partial_volume
+                    else f"{recommended} recommended · {len(ranked)} eligible"
+                )
 
         self._record_run("Supply Agent", "COMPLETED", f"need {demand.shortage:g}", stage.detail)
 
@@ -599,19 +682,38 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
             return  # pipeline already marked blocked
 
         with self._stage("Allocation", "Sizing the delivery") as stage:
-            task = create_allocation_task(demand, supply)
-            llm_result, _ = self._try_run(task, "Allocation Agent")
-
             chosen = next(
                 s for s in supply.suppliers
                 if s.supplier_id == supply.recommended_supplier
             )
             # Safe upper bound is computed deterministically.
             quantity = min(float(demand.shortage), float(chosen.available_quantity))
+            unmet = max(float(demand.shortage) - quantity, 0.0)
+            self.state.unmet_quantity = unmet
+
+            task_demand = demand
+            if unmet > 0:
+                task_demand = DemandResult(
+                    tank_id=demand.tank_id,
+                    estimated_demand=demand.estimated_demand,
+                    shortage=quantity,
+                    priority=demand.priority,
+                    reasoning=(
+                        f"{demand.reasoning} Only {quantity:g} of the {demand.shortage:g}-unit "
+                        f"shortage can be supplied now."
+                    ),
+                )
+            task = create_allocation_task(task_demand, supply)
+            llm_result, _ = self._try_run(task, "Allocation Agent")
 
             reasoning = (getattr(llm_result, "reasoning", "") or "").strip() or (
                 f"Allocate {quantity:g} units from {chosen.supplier_id} to cover "
-                f"the {demand.shortage:g}-unit shortage."
+                + (
+                    f"the {demand.shortage:g}-unit shortage."
+                    if unmet == 0
+                    else f"part of the {demand.shortage:g}-unit shortage; {unmet:g} units remain "
+                         f"uncovered and need a follow-up delivery."
+                )
             )
             self.state.allocation_result = AllocationResult(
                 tank_id=demand.tank_id,
@@ -620,7 +722,7 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
                 priority=demand.priority,
                 reasoning=reasoning,
             )
-            stage.detail = f"{quantity:g} units from {chosen.supplier_id}"
+            stage.detail = f"{quantity:g} units from {chosen.supplier_id}" + (f" · {unmet:g} unmet" if unmet else "")
 
         self._record_run("Allocation Agent", "COMPLETED", f"need {demand.shortage:g}", stage.detail)
 
@@ -801,7 +903,7 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
         self._skip(["Verification"], "Waiting for delivery", status="pending")
         self._record_run("Delivery Agent", "COMPLETED", allocation.supplier_id, stage.detail)
 
-    def complete_delivery(self, actual_quantity: float):
+    def complete_delivery(self, actual_quantity: float, evidence: str = ""):
         """Record the physical receipt, then run verification."""
         approval = self.state.manager_approval_result
         if approval is None or not approval.approved:
@@ -814,9 +916,14 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
         if self.state.delivery_request_id is not None:
             self._backend().update_delivery_status(
                 self.state.delivery_request_id,
-                {"status": "DELIVERED", "actual_quantity": float(actual_quantity)},
+                {
+                    "status": "DELIVERED",
+                    "actual_quantity": float(actual_quantity),
+                    "notes": f"Proof of delivery: {evidence.strip()}"[:300] if evidence.strip() else "",
+                },
             )
 
+        self.state.delivery_evidence = evidence.strip()
         self.state.delivery_result = DeliveryResult(
             tank_id=self.state.delivery_result.tank_id,
             supplier_id=self.state.delivery_result.supplier_id,

@@ -26,7 +26,7 @@ _WAVE_B = (
 )
 
 
-def base_css() -> str:
+def _core_css() -> str:
     return f"""
 <style>
 :root{{
@@ -156,6 +156,74 @@ div[data-testid="stTextInput"] label p,div[data-testid="stNumberInput"] label p,
 .secure{{color:#8fb7c4 !important;font-size:11px;text-align:center;margin:16px 0 0;}}
 @media (max-width:850px){{.hero-title{{font-size:36px;}}.st-key-login_card{{padding:24px 20px;}}}}
 @media (prefers-reduced-motion:reduce){{*{{animation:none !important;transition:none !important;}}}}
+</style>
+"""
+
+
+def base_css() -> str:
+    return _core_css() + components_css()
+
+
+def components_css() -> str:
+    return """
+<style>
+/* ---------- dropdowns / selects ---------- */
+div[data-baseweb="select"] > div{
+  min-height:44px !important;background:rgba(3,24,38,.92) !important;border:1px solid rgba(120,225,240,.28) !important;
+  border-radius:12px !important;transition:border-color .2s, box-shadow .2s;}
+div[data-baseweb="select"] > div:hover{border-color:rgba(77,227,240,.6) !important;}
+div[data-baseweb="select"] > div:focus-within{border-color:#4de3f0 !important;box-shadow:0 0 0 1px rgba(77,227,240,.4),0 0 20px rgba(77,227,240,.14) !important;}
+div[data-baseweb="select"] *{color:#effcff !important;}
+div[data-baseweb="select"] svg{fill:#4de3f0 !important;color:#4de3f0 !important;}
+div[data-baseweb="select"] input{caret-color:#4de3f0 !important;}
+/* the open list */
+div[data-baseweb="popover"] > div{background:transparent !important;border:0 !important;box-shadow:none !important;}
+div[data-baseweb="popover"] ul[role="listbox"],div[data-baseweb="popover"] [data-baseweb="menu"]{
+  background:linear-gradient(160deg,#08405c,#052b40) !important;border:1px solid rgba(120,225,240,.35) !important;
+  border-radius:14px !important;padding:6px !important;box-shadow:0 18px 50px rgba(0,0,0,.55) !important;max-height:280px !important;}
+div[data-baseweb="popover"] li[role="option"]{
+  background:transparent !important;border-radius:10px !important;margin:2px 0 !important;color:#e6fafd !important;transition:background .15s;}
+div[data-baseweb="popover"] li[role="option"] *{color:#e6fafd !important;}
+div[data-baseweb="popover"] li[role="option"]:hover,div[data-baseweb="popover"] li[role="option"][aria-selected="true"]{
+  background:rgba(77,227,240,.16) !important;box-shadow:inset 3px 0 0 #4de3f0;}
+/* ---------- slim water-coloured scrollbars everywhere ---------- */
+*{scrollbar-width:thin;scrollbar-color:#12a8b8 transparent;}
+::-webkit-scrollbar{width:9px;height:9px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:linear-gradient(180deg,#12a8b8,#0a6e8a);border-radius:99px;border:2px solid transparent;background-clip:content-box;}
+::-webkit-scrollbar-thumb:hover{background:linear-gradient(180deg,#4de3f0,#12a8b8);background-clip:content-box;}
+[data-testid="stSidebar"] > div:first-child{overflow-x:hidden;}
+/* ---------- sidebar navigation (radio as menu) ---------- */
+[data-testid="stSidebar"] div[role="radiogroup"]{gap:4px;}
+[data-testid="stSidebar"] div[role="radiogroup"] label{
+  padding:9px 12px;border-radius:12px;border:1px solid transparent;transition:all .2s;width:100%;cursor:pointer;}
+[data-testid="stSidebar"] div[role="radiogroup"] label:hover{background:rgba(77,227,240,.08);}
+[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked){
+  background:linear-gradient(100deg,rgba(18,168,184,.28),rgba(77,227,240,.1));border-color:rgba(77,227,240,.4);}
+[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child{display:none;}
+[data-testid="stSidebar"] div[role="radiogroup"] label p{font-weight:700 !important;font-size:13.5px !important;color:#d6f7fb !important;}
+/* ---------- tabs, forms, expanders, tables ---------- */
+.stTabs [data-baseweb="tab-list"]{gap:6px;border-bottom:1px solid rgba(120,225,240,.16);}
+.stTabs [data-baseweb="tab"]{background:transparent;border-radius:10px 10px 0 0;color:#8fb7c4;font-weight:700;padding:8px 16px;}
+.stTabs [aria-selected="true"]{color:#4de3f0 !important;}
+.stTabs [data-baseweb="tab-highlight"]{background:#4de3f0 !important;}
+[data-testid="stForm"]{background:linear-gradient(150deg,rgba(10,84,112,.3),rgba(3,32,48,.6));border:1px solid rgba(120,225,240,.16) !important;border-radius:16px;padding:18px 20px;}
+[data-testid="stFormSubmitButton"] button{border-radius:12px;font-weight:800;min-height:44px;}
+[data-testid="stFormSubmitButton"] button[kind="primaryFormSubmit"],[data-testid="stFormSubmitButton"] button[kind="primary"]{
+  background:linear-gradient(100deg,#0a9db4,#12c4d6 55%,#4de3f0) !important;color:#02222f !important;border:0 !important;}
+[data-testid="stFormSubmitButton"] button p{color:inherit !important;}
+[data-testid="stExpander"]{border:1px solid rgba(120,225,240,.18) !important;border-radius:14px !important;background:rgba(3,24,38,.45);}
+[data-testid="stDataFrame"]{border:1px solid rgba(120,225,240,.16);border-radius:14px;overflow:hidden;}
+[data-testid="stCaptionContainer"] *{color:#8fb7c4 !important;}
+div[data-testid="stCheckbox"] label p,div[data-testid="stRadio"] label p{color:#d6f7fb !important;}
+/* ---------- page header ---------- */
+.pg-title{font-size:26px;font-weight:800;letter-spacing:-.6px;color:#f6feff;margin:2px 0 2px;}
+.pg-sub{color:#8fb7c4;font-size:13px;margin-bottom:16px;}
+.userchip{display:flex;align-items:center;gap:10px;margin:2px 0 14px;padding:10px 12px;border:1px solid rgba(120,225,240,.2);border-radius:14px;background:rgba(3,24,38,.6);}
+.userchip .av{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-weight:800;color:#02222f;background:linear-gradient(135deg,#8ff5e0,#12a8b8);}
+.userchip .nm{color:#effcff;font-weight:700;font-size:13px;line-height:1.2;}
+.userchip .rl{color:#8fb7c4;font-size:10.5px;letter-spacing:1.2px;text-transform:uppercase;}
+.auth-note{color:#a9d2dc;font-size:12.5px;line-height:1.55;margin:4px 0 12px;}
 </style>
 """
 
@@ -333,6 +401,20 @@ table.sup tr.rec td{background:rgba(77,227,240,.09);} table.sup tr.rec td:first-
 .ready .big-drop{width:54px;height:54px;border-radius:0 50% 50% 50%;transform:rotate(45deg);flex:none;background:linear-gradient(135deg,#d6f7fb,#12a8b8);box-shadow:0 0 34px rgba(77,227,240,.6);animation:aqBobD 3.4s ease-in-out infinite;}
 .features{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:14px;}
 .fk{font-size:10.5px;letter-spacing:1.6px;font-weight:800;color:var(--aqua);} .ft{font-weight:800;font-size:15px;margin-top:8px;color:#f6feff;} .fx{font-size:12.5px;color:var(--muted);margin-top:6px;line-height:1.5;}
+/* ---------- live progress message bar ---------- */
+.progbar{display:flex;gap:16px;align-items:center;padding:16px 20px;margin-bottom:14px;border-radius:18px;
+  background:linear-gradient(100deg,rgba(18,168,184,.22),rgba(5,43,64,.7));border:1px solid rgba(77,227,240,.35);
+  box-shadow:0 14px 40px rgba(0,0,0,.3);}
+.progbar .spin{flex:none;width:34px;height:34px;border-radius:50%;border:3px solid rgba(77,227,240,.2);border-top-color:#4de3f0;border-right-color:#8ff5e0;animation:aqSpin 1s linear infinite;}
+.progbar .body{flex:1;min-width:0;}
+.progbar .msg{font-weight:800;font-size:15px;color:#f6feff;}
+.progbar .sub{font-size:12.5px;color:#a9d2dc;margin-top:3px;}
+.progbar .track{height:8px;border-radius:8px;background:rgba(120,225,240,.14);overflow:hidden;margin-top:11px;}
+.progbar .fill{height:100%;border-radius:8px;background:linear-gradient(90deg,#12a8b8,#4de3f0,#8ff5e0,#4de3f0);background-size:200% 100%;animation:aqFlow 1.6s linear infinite;}
+.progbar .time{flex:none;text-align:right;font-variant-numeric:tabular-nums;font-weight:800;font-size:20px;color:#4de3f0;}
+.progbar .time small{display:block;font-size:10px;font-weight:700;letter-spacing:1.2px;color:#8fb7c4;text-transform:uppercase;}
+.progbar.done{border-color:rgba(143,245,224,.5);background:linear-gradient(100deg,rgba(143,245,224,.16),rgba(5,43,64,.7));}
+.progbar.done .spin{animation:none;border-color:#8fb7c4;border-top-color:#8ff5e0;}
 @media (prefers-reduced-motion:reduce){.aq *{animation:none !important;transition:none !important;}}
 </style>
 """

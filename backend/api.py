@@ -5,6 +5,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from backend import operations as ops
 from backend.security import cors_origins, docs_enabled, require_api_key
 from backend.database import (
     initialize_database,
@@ -132,7 +133,9 @@ def get_tanks(
         SELECT
             tanks.*,
             sites.name AS site_name,
-            sites.location
+            sites.location,
+            sites.criticality,
+            sites.population
         FROM tanks
         JOIN sites
             ON tanks.site_id = sites.id
@@ -896,3 +899,100 @@ def get_agent_runs(
         """,
         (limit,),
     )
+
+
+# ============================================================
+# REAL-DATA WRITES (sites, tanks, readings, suppliers)
+# Telemetry sources (e.g. ESP32 sensors) POST to /readings.
+# ============================================================
+
+class SiteIn(BaseModel):
+    name: str = Field(min_length=1)
+    location: str = Field(min_length=1)
+    manager_name: str = ""
+    population: int = Field(default=0, ge=0)
+    criticality: str = "MEDIUM"
+
+
+class TankIn(BaseModel):
+    site_id: int
+    name: str = Field(min_length=1)
+    capacity: float = Field(gt=0)
+    current_level: float = Field(ge=0)
+    critical_threshold: float = Field(default=20, ge=0, le=100)
+    tank_code: Optional[str] = None
+
+
+class ReadingIn(BaseModel):
+    tank_code: str = Field(min_length=1)
+    current_level: Optional[float] = Field(default=None, ge=0)
+    consumption: Optional[float] = Field(default=None, ge=0)
+    timestamp: Optional[str] = None
+    source: str = "SENSOR"
+
+
+class SupplierIn(BaseModel):
+    name: str = Field(min_length=1)
+    capacity: float = Field(gt=0)
+    available: bool = True
+    distance_km: float = Field(default=0, ge=0)
+    estimated_cost: float = Field(default=0, ge=0)
+    eta_minutes: int = Field(default=60, ge=0)
+    phone: Optional[str] = None
+
+
+class SupplierUpdateIn(BaseModel):
+    name: Optional[str] = None
+    capacity: Optional[float] = Field(default=None, gt=0)
+    available: Optional[bool] = None
+    distance_km: Optional[float] = Field(default=None, ge=0)
+    estimated_cost: Optional[float] = Field(default=None, ge=0)
+    eta_minutes: Optional[int] = Field(default=None, ge=0)
+    phone: Optional[str] = None
+
+
+def _rejecting(call):
+    try:
+        return call()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/sites")
+def create_site(payload: SiteIn):
+    return _rejecting(lambda: ops.create_site(**payload.model_dump()))
+
+
+@app.post("/tanks")
+def create_tank(payload: TankIn):
+    return _rejecting(lambda: ops.create_tank(**payload.model_dump()))
+
+
+@app.post("/readings")
+def record_reading(payload: ReadingIn):
+    return _rejecting(lambda: ops.record_reading(**payload.model_dump()))
+
+
+@app.post("/suppliers")
+def create_supplier(payload: SupplierIn):
+    return _rejecting(lambda: ops.create_supplier(**payload.model_dump()))
+
+
+@app.patch("/suppliers/{supplier_id}")
+def update_supplier(supplier_id: int, payload: SupplierUpdateIn):
+    changes = payload.model_dump(exclude_none=True)
+    return _rejecting(lambda: ops.update_supplier(supplier_id, **changes))
+
+
+class SiteUpdateIn(BaseModel):
+    name: Optional[str] = None
+    location: Optional[str] = None
+    manager_name: Optional[str] = None
+    population: Optional[int] = Field(default=None, ge=0)
+    criticality: Optional[str] = None
+
+
+@app.patch("/sites/{site_id}")
+def update_site(site_id: int, payload: SiteUpdateIn):
+    changes = payload.model_dump(exclude_none=True)
+    return _rejecting(lambda: ops.update_site(site_id, **changes))
