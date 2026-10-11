@@ -1,5 +1,49 @@
 from __future__ import annotations
 
+import sys
+
+# Platform stabilization for Windows (UTF-8 encoding and WinError 10054 suppression)
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+            sys.stderr.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+    try:
+        from asyncio.proactor_events import _ProactorBasePipeTransport
+        _orig_call_connection_lost = _ProactorBasePipeTransport._call_connection_lost
+
+        def _silence_connection_lost(self, exc):
+            try:
+                _orig_call_connection_lost(self, exc)
+            except (ConnectionResetError, ConnectionAbortedError):
+                pass
+            except OSError as err:
+                if getattr(err, "winerror", None) in (10054, 10053, 10038):
+                    pass
+                else:
+                    raise
+            finally:
+                if hasattr(self, "_sock") and self._sock is not None:
+                    try:
+                        self._sock.close()
+                    except Exception:
+                        pass
+                    self._sock = None
+                server = getattr(self, "_server", None)
+                if server is not None:
+                    try:
+                        server._detach(self)
+                    except Exception:
+                        pass
+                    self._server = None
+                self._called_connection_lost = True
+
+        _ProactorBasePipeTransport._call_connection_lost = _silence_connection_lost
+    except Exception:
+        pass
+
 import threading
 import time
 
@@ -16,9 +60,9 @@ from ui.pages import (
     render_alerts_activity,
     render_deliveries,
     render_overview,
-    render_roadmap,
     render_suppliers,
 )
+from ui.hardware_page import render_hardware_integration
 from ui.theme import base_css, dashboard_css
 from workflows.aquaswarm_flow import SCENARIOS, AquaSwarmFlow, AquaSwarmState
 
@@ -279,10 +323,9 @@ def render_app() -> None:
         unsafe_allow_html=True,
     )
 
-    pages = ["Overview", "Operation", "Deliveries", "Alerts & activity", "Suppliers", "Data"]
+    pages = ["Overview", "Operation", "Deliveries", "Alerts & activity", "Suppliers", "Data", "Hardware & Sensors"]
     if user["role"] == "admin":
         pages.append("Team access")
-    pages.append("Roadmap")
     page = st.sidebar.radio("Navigate", pages, key="nav", label_visibility="collapsed")
     st.sidebar.markdown("---")
 
@@ -300,10 +343,12 @@ def render_app() -> None:
             render_suppliers(client, can_edit=user["role"] in DATA_MANAGERS)
         elif page == "Data":
             render_data(client, user["role"])
+        elif page == "Hardware & Sensors":
+            render_hardware_integration(client, user["role"])
         elif page == "Team access" and user["role"] == "admin":
             render_team(user)
         else:
-            render_roadmap()
+            render_overview(client)
     except Exception as exc:
         st.error(f"This page could not be loaded: {exc}")
         if st.button("Try again"):

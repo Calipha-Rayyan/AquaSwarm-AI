@@ -737,7 +737,6 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
             return
 
         self.state.manager_approval_result = None
-        self.state.delivery_request_id = None
         self.state.delivery_result = None
         self.state.verification_result = None
         self.state.replanning_result = None
@@ -761,16 +760,19 @@ class AquaSwarmFlow(Flow[AquaSwarmState]):
             # Persist a pending request so the human decision is recorded
             # against a real operational record. Fail closed on errors.
             if self._persist():
-                response = self._backend().create_delivery_request(
-                    {
-                        "site_id": self.state.site_id,
-                        "tank_code": allocation.tank_id,
-                        "supplier_code": allocation.supplier_id,
-                        "quantity": allocation.allocated_quantity,
-                        "notes": f"AquaSwarm operation {self.state.operation_id}; awaiting human approval.",
-                    }
-                )
-                self.state.delivery_request_id = int(response["id"])
+                existing_req_id = getattr(self.state, "delivery_request_id", None)
+                if not existing_req_id:
+                    response = self._backend().create_delivery_request(
+                        {
+                            "site_id": self.state.site_id,
+                            "tank_code": allocation.tank_id,
+                            "supplier_code": allocation.supplier_id,
+                            "quantity": allocation.allocated_quantity,
+                            "notes": f"AquaSwarm operation {self.state.operation_id}; awaiting human approval.",
+                            "operation_run_id": self.state.operation_id,
+                        }
+                    )
+                    self.state.delivery_request_id = int(response["id"])
 
             self.state.approval_required = True
             self.state.operation_status = "Awaiting Manager Approval"

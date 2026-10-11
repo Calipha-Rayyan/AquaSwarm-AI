@@ -28,3 +28,5 @@ htmlcov/
 # Generated files
 outputs/
 reports/generated/
+*.mp4
+scratch/

@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, Optional
 
 import streamlit as st
 
+from agents.registry import get_active_agents_from_state, get_configured_agent_count, get_agent_registry
 from ui.theme import dashboard_css
 
 PIPELINE_ORDER = [
@@ -333,12 +334,16 @@ def render_dashboard(
     scenario = str(_get(state, "scenario", "LIVE"))
     data_source = str(_get(state, "data_source", ""))
 
-    chips = [f'<span class="aq-chip">{esc(status_text)}</span>']
+    total_configured = get_configured_agent_count()
+    active_agents = get_active_agents_from_state(state) if state else []
+    chips = [
+        f'<span class="aq-chip">{esc(status_text)}</span>',
+        f'<span class="aq-chip">Swarm · {total_configured} Agents</span>',
+    ]
     if scenario != "LIVE":
         chips.append(f'<span class="aq-chip sim">Scenario · {esc(SCENARIO_LABELS.get(scenario, scenario))}</span>')
-    ai_used = set(_get(state, "ai_agents", []) or [])
-    if ai_used:
-        chips.append(f'<span class="aq-chip ok">AI agents active · {len(ai_used)}</span>')
+    if active_agents:
+        chips.append(f'<span class="aq-chip ok">{len(active_agents)} Active in Run</span>')
     elif _get(state, "llm_warnings", []):
         chips.append('<span class="aq-chip bad">AI agents unavailable</span>')
 

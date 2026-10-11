@@ -184,7 +184,25 @@ def record_reading(tank_code: str, current_level: Optional[float] = None,
                 (tank["site_id"], tank["id"], used, when, source),
             )
         conn.commit()
-    return query_one("SELECT * FROM tanks WHERE id = ?", (tank["id"],))
+
+    updated_tank = query_one("SELECT * FROM tanks WHERE id = ?", (tank["id"],)) or {}
+    capacity = float(updated_tank.get("capacity", tank["capacity"]))
+    current = float(updated_tank.get("current_level", tank["current_level"]))
+    return {
+        **dict(updated_tank),
+        "status": "RECORDED",
+        "message": f"Reading recorded successfully for {tank['tank_code']}.",
+        "tank_code": tank["tank_code"],
+        "tank_id": tank["id"],
+        "site_id": tank["site_id"],
+        "current_level": current,
+        "capacity": capacity,
+        "fill_percentage": round((current / capacity) * 100, 2) if capacity > 0 else 0.0,
+        "consumption": float(consumption) if consumption is not None else None,
+        "source": source,
+        "timestamp": when,
+        "updated_at": updated_tank.get("updated_at", when),
+    }
 
 
 # ---------------------------------------------------------------- suppliers
@@ -239,9 +257,14 @@ def update_supplier(supplier_id: int, **fields: Any) -> dict:
 
 
 # ---------------------------------------------------------------- maintenance
-def clear_operational_data() -> dict:
-    """Remove every operational record (sites, tanks, readings, suppliers,
-    deliveries, alerts, audit trail). User accounts are not touched."""
+def clear_operational_data(developer_override: bool = False) -> dict:
+    """Restricted administrative function: Remove operational records.
+    Never exposed to standard UI workflows. Requires explicit developer override."""
+    if not developer_override:
+        raise PermissionError(
+            "Direct operational data clearing is disabled. "
+            "Use developer_override=True only in isolated test/dev procedures."
+        )
     tables = (
         "verifications", "approvals", "delivery_requests", "alerts", "agent_runs",
         "consumption", "tanks", "suppliers", "sites",

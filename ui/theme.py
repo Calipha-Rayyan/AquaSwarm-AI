@@ -55,7 +55,8 @@ def _core_css() -> str:
 
 [data-testid="stHeader"],[data-testid="stDecoration"]{{background:transparent;}}
 footer,#MainMenu,.stDeployButton,[data-testid="stAppDeployButton"],
-[data-testid="stToolbarActions"],[data-testid="stStatusWidget"]{{display:none !important;}}
+[data-testid="stToolbarActions"],[data-testid="stStatusWidget"],
+[data-testid="InputInstructions"],.stForm [data-testid="InputInstructions"]{{display:none !important;}}
 /* never hide the control that re-opens the sidebar */
 [data-testid="stExpandSidebarButton"],[data-testid="collapsedControl"],
 [data-testid="stSidebarCollapsedControl"],[data-testid="stSidebarCollapseButton"]{{

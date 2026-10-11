@@ -172,7 +172,7 @@ def render_deliveries(client) -> None:
     header("Deliveries", "Requests, approvals and exceptions")
     deliveries = _safe(client.get_delivery_requests, [])
     verifications = _safe(client.get_verifications, [])
-    cols = {"id": "ID", "tank_code": "Tank", "site_name": "Site", "supplier_name": "Supplier", "quantity": "Quantity",
+    cols = {"id": "ID", "operation_run_id": "Operation", "tank_code": "Tank", "site_name": "Site", "supplier_name": "Supplier", "quantity": "Quantity",
             "actual_quantity": "Received", "status": "Status", "estimated_arrival": "ETA", "requested_at": "Requested", "notes": "Notes"}
 
     exceptions = [d for d in deliveries if d.get("status") == "DELIVERY_EXCEPTION"]
@@ -286,34 +286,4 @@ def render_suppliers(client, can_edit: bool) -> None:
                 st.success("Supplier updated.")
                 st.rerun()
             except Exception as exc:
-                st.error(str(exc))
-
-
-# ---------------------------------------------------------------- roadmap
-_ROADMAP = [
-    ("Phase 2", "ESP32 + ultrasonic/flow sensors for real telemetry", "road-part", "Ingestion API ready",
-     "Sensors can post levels and flow to the secured readings endpoint today."),
-    ("Phase 2", "Mobile/WhatsApp notifications for managers and operators", "road-part", "E-mail alerts available",
-     "High-priority alerts e-mail managers when SMTP is configured; WhatsApp is next."),
-    ("Phase 2", "Real supplier/tanker network with geolocation and availability", "road-part", "Supplier directory live",
-     "Suppliers, prices and availability are managed in-app; map-based location is next."),
-    ("Phase 3", "ML-based demand forecasting and anomaly detection trained on site history", "road-plan", "Planned",
-     "Today's baseline compares the latest reading with recent history; models follow once enough history exists."),
-    ("Phase 3", "Optimization engine for multi-site allocation and routing", "road-part", "Preview available",
-     "The Overview supply plan already shares limited volume by urgency and criticality; routing is next."),
-    ("Phase 3", "Proof-of-delivery with digital meter/sensor evidence", "road-part", "Evidence notes captured",
-     "Each delivery records a proof reference; automatic sensor confirmation is next."),
-    ("Phase 4", "Multi-tenant facility management platform and enterprise controls", "road-plan", "Planned",
-     "Role-based access and approvals are in place as the foundation."),
-]
-
-
-def render_roadmap() -> None:
-    header("Roadmap", "Where AquaSwarm is going, and what already exists")
-    rows = "".join(
-        f'<tr><td><b>{esc(phase)}</b></td><td>{esc(item)}<br><span style="color:#8fb7c4;font-size:12px">{esc(note)}</span></td>'
-        f'<td><span class="pill {cls}">{esc(status)}</span></td></tr>'
-        for phase, item, cls, status, note in _ROADMAP
-    )
-    st.html(f'<div class="aq"><div class="card"><div class="tablescroll"><table class="sup">'
-            f'<tr><th>Stage</th><th>Enhancement</th><th>Status</th></tr>{rows}</table></div></div></div>')
+                st.error(str(exc))

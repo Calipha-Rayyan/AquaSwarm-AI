@@ -277,6 +277,7 @@ def create_schema() -> None:
         actual_quantity REAL,
         delivered_at TEXT,
         notes TEXT NOT NULL DEFAULT '',
+        operation_run_id TEXT,
         FOREIGN KEY (site_id)
             REFERENCES sites(id),
         FOREIGN KEY (tank_id)
@@ -363,6 +364,9 @@ def ensure_columns() -> None:
         "sites": {
             "population": "INTEGER NOT NULL DEFAULT 0",
             "criticality": "TEXT NOT NULL DEFAULT 'MEDIUM'",
+        },
+        "delivery_requests": {
+            "operation_run_id": "TEXT",
         },
     }
     for table, columns in wanted.items():

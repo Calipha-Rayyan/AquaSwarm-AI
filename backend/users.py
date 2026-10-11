@@ -325,13 +325,18 @@ def _issue(reset_id: int) -> str:
     return code
 
 
-def request_password_reset(email: str) -> None:
-    """Always succeeds from the caller's view (no account enumeration)."""
+def request_password_reset(email: str) -> Optional[str]:
+    """Request a password reset code.
+
+    In production with configured SMTP, sends an e-mail with the code and returns None.
+    In local development environments without SMTP, issues the code immediately,
+    logs it to stdout, and returns the clear code string so the user is never locked out.
+    """
     ensure_schema()
     email = (email or "").strip().lower()
     user = query_one("SELECT * FROM users WHERE email = ? AND status = 'ACTIVE'", (email,))
     if not user:
-        return
+        return None
     with get_connection() as conn:
         conn.execute("DELETE FROM password_resets WHERE user_id = ? AND status IN ('REQUESTED','ISSUED')", (user["id"],))
         cur = conn.execute(
@@ -353,6 +358,13 @@ def request_password_reset(email: str) -> None:
                 conn.execute("UPDATE password_resets SET status='REQUESTED', code_hash=NULL, expires_at=NULL WHERE id=?",
                              (reset_id,))
                 conn.commit()
+            return None
+        return None
+
+    # Local development fallback: issue code immediately
+    code = _issue(reset_id)
+    print(f"[AquaSwarm Auth] One-time password reset code for {email}: {code}", flush=True)
+    return code
 
 
 def pending_resets() -> list[dict]:
@@ -397,3 +409,104 @@ def complete_password_reset(email: str, code: str, new_password: str) -> None:
                      (hash_password(new_password), user["id"]))
         conn.execute("UPDATE password_resets SET status='USED', code_hash=NULL WHERE id=?", (reset["id"],))
         conn.commit()
+
+
+def unlock_user(email_or_id: str | int) -> bool:
+    """Clear failed login attempts and lockout timestamps for a user."""
+    ensure_schema()
+    with get_connection() as conn:
+        if isinstance(email_or_id, int) or str(email_or_id).isdigit():
+            cur = conn.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?", (int(email_or_id),))
+        else:
+            cur = conn.execute(
+                "UPDATE users SET failed_logins = 0, locked_until = NULL WHERE email = ?",
+                (str(email_or_id).strip().lower(),),
+            )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def reset_password_direct(email_or_id: str | int, new_password: str) -> bool:
+    """Directly update password and unlock user (for CLI emergency recovery)."""
+    ensure_schema()
+    validate_password(new_password)
+    with get_connection() as conn:
+        if isinstance(email_or_id, int) or str(email_or_id).isdigit():
+            cur = conn.execute(
+                "UPDATE users SET password_hash = ?, failed_logins = 0, locked_until = NULL WHERE id = ?",
+                (hash_password(new_password), int(email_or_id)),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE users SET password_hash = ?, failed_logins = 0, locked_until = NULL WHERE email = ?",
+                (hash_password(new_password), str(email_or_id).strip().lower()),
+            )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+# ------------------------------------------------------------------ CLI tool
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="AquaSwarm AI User & Access Management")
+    subparsers = parser.add_subparsers(dest="cmd")
+
+    subparsers.add_parser("list", help="List all user accounts")
+
+    p_unlock = subparsers.add_parser("unlock", help="Unlock a locked user account")
+    p_unlock.add_argument("email", help="Account email or ID to unlock")
+
+    p_reset = subparsers.add_parser("reset-password", help="Directly set a new password")
+    p_reset.add_argument("email", help="Account email")
+    p_reset.add_argument("new_password", help="New password (letters and numbers, min 10 chars)")
+
+    p_admin = subparsers.add_parser("create-admin", help="Create an initial or additional admin account")
+    p_admin.add_argument("email", help="Admin email")
+    p_admin.add_argument("name", help="Admin full name")
+    p_admin.add_argument("password", help="Admin password")
+
+    args = parser.parse_args()
+
+    if args.cmd == "list":
+        users_list = list_users()
+        print(f"Total Users: {len(users_list)}")
+        for u in users_list:
+            row = query_one("SELECT failed_logins, locked_until FROM users WHERE id = ?", (u["id"],))
+            lock_info = f" [LOCKED until {row['locked_until']}]" if row and row.get("locked_until") else ""
+            print(f" - [{u['id']}] {u['full_name']} <{u['email']}> | Role: {u['role']} | Status: {u['status']}{lock_info}")
+    elif args.cmd == "unlock":
+        if unlock_user(args.email):
+            print(f"Successfully unlocked user: {args.email}")
+        else:
+            print(f"User not found: {args.email}")
+    elif args.cmd == "reset-password":
+        try:
+            if reset_password_direct(args.email, args.new_password):
+                print(f"Successfully updated password and unlocked user: {args.email}")
+            else:
+                print(f"User not found: {args.email}")
+        except Exception as e:
+            print(f"Error: {e}")
+    elif args.cmd == "create-admin":
+        try:
+            admin = create_first_admin(args.email, args.name, args.password)
+            print(f"Successfully created administrator: {admin['email']}")
+        except Exception as e:
+            # Fallback if first admin already exists: insert directly as admin
+            try:
+                email_clean = validate_email(args.email)
+                name_clean = _clean_name(args.name)
+                validate_password(args.password)
+                with get_connection() as conn:
+                    conn.execute(
+                        "INSERT INTO users (email, full_name, role, status, password_hash, created_at) "
+                        "VALUES (?, ?, 'admin', 'ACTIVE', ?, ?)",
+                        (email_clean, name_clean, hash_password(args.password), _iso(_now())),
+                    )
+                    conn.commit()
+                print(f"Successfully created additional administrator: {email_clean}")
+            except Exception as e2:
+                print(f"Error creating administrator: {e2}")
+    else:
+        parser.print_help()

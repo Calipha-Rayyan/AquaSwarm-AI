@@ -56,6 +56,7 @@ class DeliveryRequestIn(BaseModel):
     quantity: float = Field(gt=0)
     estimated_arrival: Optional[str] = None
     notes: str = ""
+    operation_run_id: Optional[str] = None
 
 
 class ApprovalIn(BaseModel):
@@ -415,13 +416,35 @@ def create_delivery_request(
             detail="Requested quantity exceeds supplier capacity",
         )
 
+    if payload.operation_run_id:
+        existing = query_one(
+            """
+            SELECT
+                dr.*,
+                tanks.tank_code,
+                sites.name AS site_name,
+                suppliers.supplier_code,
+                suppliers.name AS supplier_name
+            FROM delivery_requests dr
+            JOIN tanks ON dr.tank_id = tanks.id
+            JOIN sites ON dr.site_id = sites.id
+            JOIN suppliers ON dr.supplier_id = suppliers.id
+            WHERE dr.operation_run_id = ?
+            ORDER BY dr.id DESC
+            LIMIT 1
+            """,
+            (payload.operation_run_id,),
+        )
+        if existing:
+            return existing
+
     request_id = execute_returning_id(
         """
         INSERT INTO delivery_requests
         (site_id, tank_id, supplier_id,
          quantity, status,
-         estimated_arrival, requested_at, notes)
-        VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?)
+         estimated_arrival, requested_at, notes, operation_run_id)
+        VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)
         """,
         (
             payload.site_id,
@@ -431,6 +454,7 @@ def create_delivery_request(
             payload.estimated_arrival,
             now(),
             payload.notes,
+            payload.operation_run_id,
         ),
     )
 
@@ -955,7 +979,10 @@ def _rejecting(call):
     try:
         return call()
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        msg = str(exc)
+        if "Unknown tank" in msg or "Site not found" in msg or "Supplier not found" in msg or "User not found" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
 
 
 @app.post("/sites")

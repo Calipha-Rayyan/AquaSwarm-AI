@@ -415,6 +415,20 @@ class BackendClient:
 
         return self.get("/consumption", params=params)
 
+    def get_latest_readings(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Return the most recent consumption or sensor telemetry reading for each tank.
+
+        Queries the supported /consumption endpoint and returns the latest record per unique tank_code.
+        If no consumption records exist, returns an empty list.
+        """
+        rows = self.get_consumption(limit=limit) or []
+        latest_by_tank: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            tc = r.get("tank_code")
+            if tc and tc not in latest_by_tank:
+                latest_by_tank[tc] = r
+        return list(latest_by_tank.values())
+
     def get_suppliers(self, available_only: bool = False):
         return self.get(
             "/suppliers",

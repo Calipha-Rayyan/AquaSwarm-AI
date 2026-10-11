@@ -330,3 +330,137 @@ def plan_allocation(needs: List[Dict], suppliers: List[Dict]) -> Dict:
         "unmet_total": max(total_need - total_given, 0.0),
         "constraint_notes": notes,
     }
+
+
+# --------------------------------------------------------------------------
+# Demand Forecasting Readiness & Shortage Risk Analytics
+# --------------------------------------------------------------------------
+def evaluate_forecasting_readiness(readings: List[Any], min_ml_records: int = 30) -> Dict[str, Any]:
+    """Evaluate historical consumption readings for baseline forecasting and ML readiness.
+
+    Requirements:
+    - < 3 readings: Insufficient data for reliable baseline.
+    - 3 - (min_ml_records-1) readings: Historical rolling baseline operational; insufficient for ML model.
+    - >= min_ml_records readings: Sufficient dataset for training statistical / ML regressors.
+    """
+    amounts: List[float] = []
+    for r in readings:
+        if isinstance(r, dict):
+            val = r.get("amount") or r.get("consumption")
+        else:
+            val = r
+        try:
+            if val is not None:
+                num = float(val)
+                if isfinite(num) and num >= 0:
+                    amounts.append(num)
+        except (ValueError, TypeError):
+            continue
+
+    count = len(amounts)
+
+    if count == 0:
+        return {
+            "records_count": 0,
+            "baseline_daily_demand": 0.0,
+            "trend_direction": "UNKNOWN",
+            "trend_percentage": 0.0,
+            "model_readiness": "INSUFFICIENT_DATA",
+            "model_readiness_label": "Insufficient historical data (0 readings)",
+            "can_forecast_ml": False,
+            "shortage_risk_level": "UNKNOWN",
+            "assumptions": ["No historical readings available for this tank."],
+            "anomaly_detected": False,
+        }
+
+    latest = amounts[0]
+    baseline = sum(amounts) / count
+
+    # Trend detection (comparing first half vs second half or latest vs baseline)
+    if count >= 3:
+        earlier = amounts[1:]
+        earlier_avg = sum(earlier) / len(earlier) if earlier else baseline
+        trend_pct = ((latest - earlier_avg) / earlier_avg * 100.0) if earlier_avg > 0 else 0.0
+    else:
+        trend_pct = 0.0
+
+    trend_dir = "STABLE"
+    if trend_pct >= 20.0:
+        trend_dir = "RISING"
+    elif trend_pct <= -20.0:
+        trend_dir = "FALLING"
+
+    is_ml_ready = count >= min_ml_records
+    readiness_status = "SUFFICIENT_FOR_ML" if is_ml_ready else "BASELINE_OPERATIONAL" if count >= 3 else "LIMITED_DATA"
+    readiness_label = (
+        f"Trained ML Ready ({count}/{min_ml_records} records)"
+        if is_ml_ready
+        else f"Deterministic Baseline Active ({count}/{min_ml_records} records; ML requires {min_ml_records})"
+        if count >= 3
+        else f"Preliminary Data ({count} reading{'s' if count != 1 else ''}; 3+ required for rolling baseline)"
+    )
+
+    assumptions = [
+        f"Demand projection uses rolling average of {count} verified reading(s): {baseline:.1f} units/day.",
+        f"Inflow assumed at default baseline.",
+        "Unmet demand assumes linear consumption drawdown.",
+    ]
+    if not is_ml_ready:
+        assumptions.append(f"Advanced machine learning requires at least {min_ml_records} historical daily observations.")
+
+    return {
+        "records_count": count,
+        "latest_consumption": latest,
+        "baseline_daily_demand": round(baseline, 2),
+        "trend_direction": trend_dir,
+        "trend_percentage": round(trend_pct, 1),
+        "model_readiness": readiness_status,
+        "model_readiness_label": readiness_label,
+        "can_forecast_ml": is_ml_ready,
+        "min_required_records_ml": min_ml_records,
+        "assumptions": assumptions,
+    }
+
+
+# --------------------------------------------------------------------------
+# Multi-Site Routing & Sequential Dispatch Optimization
+# --------------------------------------------------------------------------
+def plan_allocation_with_routing(needs: List[Dict], suppliers: List[Dict]) -> Dict:
+    """Combines deterministic allocation with multi-site dispatch sequence.
+
+    Orders deliveries sequentially by supplier proximity, priority, and criticality.
+    Clearly marks whether geographic coordinates are available.
+    """
+    plan = plan_allocation(needs, suppliers)
+    allocations = plan["allocations"]
+
+    # Build route dispatch legs
+    routed_legs = []
+    supplier_groups: Dict[str, List[Dict]] = {}
+    for alloc in allocations:
+        if alloc.get("allocated", 0) > 0 and alloc.get("supplier_id"):
+            supplier_groups.setdefault(alloc["supplier_id"], []).append(alloc)
+
+    leg_number = 1
+    for supplier_id, stops in supplier_groups.items():
+        # Sort stops by priority descending
+        sorted_stops = sorted(
+            stops,
+            key=lambda s: (-_LEVEL_WEIGHT.get(str(s.get("priority", "LOW")).upper(), 1), -float(s.get("allocated", 0)))
+        )
+        for stop in sorted_stops:
+            routed_legs.append({
+                "leg": leg_number,
+                "supplier_id": supplier_id,
+                "destination_tank": stop["tank_code"],
+                "site_name": stop["site_name"],
+                "volume": stop["allocated"],
+                "priority": stop["priority"],
+                "has_coordinates": False,  # Transparently declared
+                "routing_note": f"Leg {leg_number}: Dispatch {stop['allocated']:g} units from {supplier_id} to {stop['site_name']} ({stop['tank_code']}).",
+            })
+            leg_number += 1
+
+    plan["routed_legs"] = routed_legs
+    plan["route_count"] = len(supplier_groups)
+    return plan

@@ -38,26 +38,52 @@ def _title(title: str, copy: str) -> None:
     )
 
 
+from agents.registry import get_configured_agent_count
+
+
+def validate_password_strength(password: str) -> tuple[bool, str]:
+    if not password:
+        return False, "Please enter a password."
+    if len(password) < 10:
+        return False, "Password must be at least 10 characters long."
+    import re
+    if not re.search(r"[A-Za-z]", password) or not re.search(r"\d", password):
+        return False, "Password must contain both letters and numbers."
+    return True, ""
+
+
 def _first_run() -> None:
-    _title("Set up AquaSwarm", "Create the administrator account. You can invite your team afterwards.")
+    _title("Set up AquaSwarm", "Create the initial administrator account. You can configure facilities and invite operators afterwards.")
+    st.info("🔐 **Security Requirements**: Password must be at least 10 characters and contain both letters and numbers.")
     with st.form("first_run"):
-        name = st.text_input("Full name")
-        email = st.text_input("Work e-mail")
-        password = st.text_input("Password", type="password", help=None)
-        confirm = st.text_input("Confirm password", type="password")
-        st.caption("At least 10 characters, with letters and numbers.")
+        name = st.text_input("Full name", placeholder="e.g. Operations Director")
+        email = st.text_input("Work e-mail", placeholder="admin@organization.com")
+        password = st.text_input("Password", type="password", placeholder="Minimum 10 characters (letters & numbers)")
+        confirm = st.text_input("Confirm password", type="password", placeholder="Repeat your password")
         go = st.form_submit_button("Create administrator", type="primary", use_container_width=True)
     if go:
+        clean_name = (name or "").strip()
+        clean_email = (email or "").strip()
+        if not clean_name:
+            st.error("Please enter your full name.")
+            return
+        if not clean_email:
+            st.error("Please enter your work e-mail address.")
+            return
+        valid, msg = validate_password_strength(password)
+        if not valid:
+            st.error(msg)
+            return
         if password != confirm:
-            st.error("The passwords do not match.")
+            st.error("The passwords do not match. Please re-enter the confirmation password.")
             return
         try:
-            user = users.create_first_admin(email, name, password)
+            user = users.create_first_admin(clean_email, clean_name, password)
+            st.session_state.user = user
+            st.success("Administrator account created successfully.")
+            st.rerun()
         except ValueError as exc:
             st.error(str(exc))
-            return
-        st.session_state.user = user
-        st.rerun()
 
 
 def _sign_in() -> None:
@@ -67,13 +93,19 @@ def _sign_in() -> None:
         password = st.text_input("Password", type="password")
         go = st.form_submit_button("Sign in", type="primary", use_container_width=True)
     if go:
-        if not email.strip() or not password:
+        clean_email = (email or "").strip().lower()
+        if not clean_email or not password:
             st.error("Enter your e-mail and password.")
             return
         try:
-            st.session_state.user = users.authenticate(email, password)
+            st.session_state.user = users.authenticate(clean_email, password)
         except users.AuthError as exc:
-            st.error(str(exc))
+            msg = str(exc)
+            if "Too many failed attempts" in msg or "locked" in msg.lower():
+                st.error(f"🔒 {msg}")
+                st.info("💡 **Account Locked**: You can reset your password using the **Reset password** tab above, or run `.\\.venv\\Scripts\\python.exe -m backend.users unlock <email>` in PowerShell.")
+            else:
+                st.error(msg)
             return
         st.rerun()
 
@@ -89,17 +121,35 @@ def _request_access() -> None:
         password = st.text_input("Choose a password", type="password", key="req_pw")
         confirm = st.text_input("Confirm password", type="password", key="req_pw2")
         note = st.text_input("Note for the administrator (optional)")
+        st.caption("Password must be at least 10 characters and contain letters and numbers.")
         go = st.form_submit_button("Send request", type="primary", use_container_width=True)
     if go:
+        clean_name = (name or "").strip()
+        clean_email = (email or "").strip()
+        if not clean_name:
+            st.error("Please enter your full name.")
+            return
+        if not clean_email:
+            st.error("Please enter your work e-mail address.")
+            return
+        if not password:
+            st.error("Please choose a password.")
+            return
+        if len(password) < 10:
+            st.error("Password must be at least 10 characters.")
+            return
+        import re
+        if not re.search(r"[A-Za-z]", password) or not re.search(r"\d", password):
+            st.error("Password must contain both letters and numbers.")
+            return
         if password != confirm:
             st.error("The passwords do not match.")
             return
         try:
-            users.request_access(email, name, password, role, note)
+            users.request_access(clean_email, clean_name, password, role, note)
+            st.success("Access request submitted. An administrator will review and activate your account.")
         except ValueError as exc:
             st.error(str(exc))
-            return
-        st.success("Request sent. You can sign in once an administrator approves it.")
 
 
 def _reset_password() -> None:
@@ -108,30 +158,56 @@ def _reset_password() -> None:
         email = st.text_input("Account e-mail", key="rst_email")
         go = st.form_submit_button("Request a code", use_container_width=True)
     if go:
+        clean_email = (email or "").strip().lower()
+        if not clean_email:
+            st.error("Please enter your account e-mail address.")
+            return
+        code = None
         try:
-            users.request_password_reset(email)
+            code = users.request_password_reset(clean_email)
         except Exception:
             pass  # never reveal whether the account exists
-        st.info("If that account exists, a code has been sent or queued. "
-                "If you do not receive an e-mail, ask your administrator to issue one.")
+        if code:
+            st.warning(
+                f"⚠️ **E-mail (SMTP) is not configured on this server.**\n\n"
+                f"For local administration, your one-time reset code is: **`{code}`** (valid for 30 minutes).\n\n"
+                f"Enter it below in **Already have a code?** to set your new password immediately."
+            )
+            st.session_state["default_rst_email"] = clean_email
+            st.session_state["default_rst_code"] = code
+        else:
+            st.info("If that account exists, a code has been sent or queued. "
+                    "If you do not receive an e-mail, ask your administrator to issue one.")
 
+    default_email = st.session_state.get("default_rst_email", "")
+    default_code = st.session_state.get("default_rst_code", "")
     st.markdown('<div class="auth-note">Already have a code?</div>', unsafe_allow_html=True)
     with st.form("reset_complete"):
-        email2 = st.text_input("Account e-mail", key="rst_email2")
-        code = st.text_input("One-time code")
-        new_pw = st.text_input("New password", type="password", key="rst_pw")
+        email2 = st.text_input("Account e-mail", value=default_email, key="rst_email2")
+        code_input = st.text_input("One-time code", value=default_code)
+        new_pw = st.text_input("New password", type="password", key="rst_pw", placeholder="Minimum 10 characters (letters & numbers)")
         confirm = st.text_input("Confirm new password", type="password", key="rst_pw2")
         done = st.form_submit_button("Set new password", type="primary", use_container_width=True)
     if done:
+        clean_email2 = (email2 or "").strip().lower()
+        clean_code = (code_input or "").strip().upper()
+        if not clean_email2 or not clean_code:
+            st.error("Please provide both your account e-mail and the one-time code.")
+            return
+        valid, msg = validate_password_strength(new_pw)
+        if not valid:
+            st.error(msg)
+            return
         if new_pw != confirm:
-            st.error("The passwords do not match.")
+            st.error("The passwords do not match. Please re-enter the confirmation password.")
             return
         try:
-            users.complete_password_reset(email2, code, new_pw)
+            users.complete_password_reset(clean_email2, clean_code, new_pw)
+            st.session_state.pop("default_rst_code", None)
         except ValueError as exc:
             st.error(str(exc))
             return
-        st.success("Password updated. You can sign in now.")
+        st.success("✅ Password updated successfully! You can now sign in using the 'Sign in' tab.")
 
 
 def render_auth_gate() -> None:
